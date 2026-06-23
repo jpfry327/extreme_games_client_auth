@@ -49,3 +49,16 @@ export interface Projectile {
   prevX: number;
   prevY: number;
 }
+
+/**
+ * Transient things that happened during a tick which the renderer (or, later, a
+ * network client) turns into visuals/sounds. The sim stays renderer-agnostic: it
+ * only records *what* happened and *where*, never how to draw it.
+ */
+export interface BombExplodedEvent {
+  type: "bombExploded";
+  x: number;
+  y: number;
+}
+
+export type GameEvent = BombExplodedEvent;

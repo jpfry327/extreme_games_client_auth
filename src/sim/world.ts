@@ -2,7 +2,7 @@ import { TILE_SIZE } from "../config";
 import { GameMap } from "./gamemap";
 import { createShip, stepShip } from "./ship";
 import { stepProjectile, tryFireBomb, tryFireBullet } from "./projectiles";
-import type { InputCommand, Projectile, ShipState } from "./types";
+import type { GameEvent, InputCommand, Projectile, ShipState } from "./types";
 
 /**
  * The whole game state for one tick of simulation. `step()` advances everything
@@ -11,6 +11,10 @@ import type { InputCommand, Projectile, ShipState } from "./types";
 export class World {
   ship: ShipState;
   projectiles: Projectile[] = [];
+
+  /** Events produced this tick (e.g. bomb explosions). Appended to during
+   *  step(); the renderer drains this once per drawn frame. */
+  events: GameEvent[] = [];
 
   constructor(public readonly map: GameMap) {
     const spawn = findSpawn(map);
@@ -29,7 +33,13 @@ export class World {
       if (b) this.projectiles.push(b);
     }
 
-    for (const p of this.projectiles) stepProjectile(p, this.map);
+    for (const p of this.projectiles) {
+      stepProjectile(p, this.map);
+      // A bomb that just died — by wall impact or by aging out — detonates.
+      if (!p.alive && p.kind === "bomb") {
+        this.events.push({ type: "bombExploded", x: p.x, y: p.y });
+      }
+    }
     // Drop dead projectiles (filter is fine at prototype counts).
     if (this.projectiles.some((p) => !p.alive)) {
       this.projectiles = this.projectiles.filter((p) => p.alive);

@@ -47,7 +47,7 @@ async function main() {
 
     const input = keyboard.sample();
     const alpha = loop.advance(dt, input);
-    renderer.draw(world, alpha);
+    renderer.draw(world, alpha, dt);
 
     // HUD (updated a few times a second).
     fpsAccum += dt;
