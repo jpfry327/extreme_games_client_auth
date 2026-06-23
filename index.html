@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Subspace Prototype</title>
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #000;
+      }
+      #app {
+        width: 100vw;
+        height: 100vh;
+      }
+      #hud {
+        position: fixed;
+        top: 8px;
+        left: 8px;
+        color: #6f6;
+        font: 12px/1.4 monospace;
+        white-space: pre;
+        pointer-events: none;
+        text-shadow: 0 0 2px #000;
+      }
+      #help {
+        position: fixed;
+        bottom: 8px;
+        left: 8px;
+        color: #888;
+        font: 12px/1.4 monospace;
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="hud"></div>
+    <div id="help">arrows: rotate / thrust &nbsp;•&nbsp; Z (or ctrl): fire &nbsp;•&nbsp; Tab: bomb &nbsp;•&nbsp; shift: afterburner &nbsp;•&nbsp; F: fullscreen</div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

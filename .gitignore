@@ -1,0 +1,18 @@
+# Dependencies (reinstalled via `npm install` from package-lock.json)
+node_modules/
+
+# Build output
+dist/
+
+# Vite cache
+.vite/
+
+# Logs
+npm-debug.log*
+*.log
+
+# Editor / OS cruft
+.DS_Store
+.idea/
+.vscode/
+*.swp
