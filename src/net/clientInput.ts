@@ -102,4 +102,9 @@ export class ClientInputManager {
   get pendingCount(): number {
     return this.pending.length;
   }
+
+  /** Un-acked commands, ascending by `seq` — the M2.4 replay buffer. */
+  get unacked(): readonly SequencedInput[] {
+    return this.pending;
+  }
 }

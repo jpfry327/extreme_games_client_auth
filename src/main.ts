@@ -8,6 +8,7 @@ import { Renderer } from "./render/renderer";
 import { WebSocketTransport } from "./net/WebSocketTransport";
 import { SnapshotInterpolator } from "./net/interpolation";
 import { ClientInputManager } from "./net/clientInput";
+import { Predictor } from "./net/prediction";
 
 // To run without a server (in-process loopback, M2.0 mode), swap the import
 // above for these two and uncomment the loopback block below:
@@ -33,6 +34,10 @@ async function main() {
   // holds the un-acked ring buffer. Snapshots ack by seq; prediction (M2.4) will
   // replay the survivors. Nothing is corrected yet — this is the data plane only.
   const inputMgr = new ClientInputManager();
+  // Prediction (M2.4): a third, predicted world holding only the local player.
+  // Each frame it resets to the latest acked snapshot and replays the un-acked
+  // inputs, so the local ship reacts instantly instead of lagging by RTT.
+  const predictor = new Predictor(map);
   // Latest server-reported input-queue depth for us (debug overlay only).
   let serverInputDepth = 0;
 
@@ -78,7 +83,13 @@ async function main() {
   transport.setSnapshotHandler((snap) => {
     const now = performance.now();
     interp.push(snap, now);
+    // M2.4 reconciliation: measure prediction error *before* the ack drops the
+    // un-acked inputs (so this frame's replay still recorded the acked seq), then
+    // reset the predicted world's rewind point to the fresh authoritative pose.
+    const local = snap.players.find((p) => p.id === view.localPlayerId);
+    if (local) predictor.measureError(local, snap.lastProcessedInputSeq);
     inputMgr.ack(snap.lastProcessedInputSeq, now);
+    if (local) predictor.setAuthoritative(local, snap.tick);
     serverInputDepth = snap.inputBufferDepth;
   });
 
@@ -124,6 +135,14 @@ async function main() {
     // to the latest snapshot (still laggy — M2.4 adds prediction). The pose is
     // baked in with prev*===current, so alpha is a no-op here.
     interp.buildView(view, now, NET.interpDelayMs, view.localPlayerId);
+
+    // M2.4: replace the laggy snapshot-pinned local player with the predicted
+    // one (reset to the last ack + replay of un-acked inputs). The camera and
+    // local ship now track the predicted pose; remotes stay interpolated. alpha
+    // is 1, so the renderer's prev→current lerp draws the predicted pose as-is.
+    const predLocal = predictor.predict(inputMgr.unacked, view.localPlayerId);
+    if (predLocal) view.players.set(view.localPlayerId, predLocal);
+
     renderer.draw(view, 1, dt);
 
     // Drain events the interpolator released (in interpolated time) this frame.
@@ -165,13 +184,14 @@ async function main() {
     // server buffer depth should sit at a small steady value (one snapshot's
     // worth of commands); ~0 means starvation, a growing number means lag.
     netdebug.textContent =
-      `── netcode (M2.3) ──\n` +
+      `── netcode (M2.4) ──\n` +
       `rtt ${inputMgr.rttMs.toFixed(0)}ms (ack)\n` +
       `acked seq ${inputMgr.lastAckedSeq}\n` +
       `client tick ${inputMgr.clientTickCount}\n` +
       `server tick ${view.tick}\n` +
       `input buf (server) ${serverInputDepth}\n` +
-      `un-acked (client) ${inputMgr.pendingCount}`;
+      `un-acked (client) ${inputMgr.pendingCount}\n` +
+      `pred err ${predictor.predictionErrorPx.toFixed(1)}px`;
 
     requestAnimationFrame(frame);
   }
