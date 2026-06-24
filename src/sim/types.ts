@@ -135,8 +135,11 @@ export type ProjectileKind = "bullet" | "bomb";
 
 /** A bullet or a bomb — they share flight physics, differing only in their
  *  config (speed, lifetime, bounces) and how they're drawn. Each is tagged with
- *  the `owner` that fired it, so M1 can credit kills and ignore self-hits. */
+ *  the `owner` that fired it, so M1 can credit kills and ignore self-hits.
+ *  `id` is a stable server-assigned integer so snapshots can track entities
+ *  across ticks without relying on object identity (M2.0). */
 export interface Projectile {
+  id: number;
   kind: ProjectileKind;
   owner: PlayerId;
   x: number;

@@ -1,29 +1,38 @@
-import { TICK_HZ, WARBIRD } from "./config";
+import { TICK_HZ } from "./config";
 import { Keyboard } from "./input/keyboard";
 import { keyboardLockSupported, toggleFullscreen } from "./input/fullscreen";
 import { loadMap } from "./map/loader";
 import { computeBotInput } from "./sim/bot";
-import { FixedLoop } from "./sim/loop";
 import { isAlive } from "./sim/player";
 import { World } from "./sim/world";
 import { Renderer } from "./render/renderer";
-
-/** The M1 combat bot's player id — a second player driven by AI, not a keyboard. */
-const BOT_ID = "bot";
+import { GameServer, BOT_PLAYER_ID } from "./net/server";
+import { LoopbackTransport } from "./net/transport";
+import { applySnapshot } from "./net/snapshot";
 
 async function main() {
   const mount = document.getElementById("app")!;
   const hud = document.getElementById("hud")!;
   const killfeed = document.getElementById("killfeed")!;
 
-  // 1. Load the map, 2. build the (pure) world, 3. set up the fixed-step loop.
+  // 1. Load the map.
   const map = await loadMap();
-  const world = new World(map);
-  world.localPlayer.name = "fecundity"; // (client identity; the network sets this in M2)
-  world.addPlayer(BOT_ID, "Roaming Bot", 1, WARBIRD); // the thing to fight (M1)
-  const loop = new FixedLoop(world);
 
-  // 4. Input + renderer.
+  // 2. Spin up the in-process authoritative server. It owns the World + FixedLoop
+  //    and is the single source of truth for all game state.
+  const server = new GameServer(map);
+  server.authoritativeWorld.localPlayer.name = "fecundity";
+
+  // 3. Create the client world — a read-only mirror populated exclusively by
+  //    applySnapshot. The renderer reads this; the sim never steps it.
+  //    `addLocalPlayer = false` so we start empty; the snapshot fills it in.
+  const clientWorld = new World(map, 1, false);
+
+  // 4. Loopback transport: keyboard → server; server snapshot → clientWorld.
+  const transport = new LoopbackTransport(server, server.localPlayerId);
+  transport.setSnapshotHandler((snap) => applySnapshot(clientWorld, snap));
+
+  // 5. Input + renderer.
   const keyboard = new Keyboard();
 
   // Press F to toggle fullscreen (which also enables keyboard lock on Chromium,
@@ -45,9 +54,9 @@ async function main() {
   // toolkit in M3. For now we render recent kill lines into a DOM overlay.
   const feed = new KillFeed(killfeed);
 
-  // 5. The render/animation loop. Sample input, advance the sim in fixed steps,
-  //    then draw with interpolation. requestAnimationFrame runs at the display's
-  //    refresh rate; the sim still ticks at exactly TICK_HZ.
+  // 6. The render/animation loop. Sample input, send to server, advance the
+  //    authoritative sim, then draw the client world (which was just updated
+  //    synchronously by the snapshot handler).
   let last = performance.now();
   let fpsAccum = 0;
   let fpsFrames = 0;
@@ -57,27 +66,30 @@ async function main() {
     const dt = (now - last) / 1000;
     last = now;
 
-    // Sample this frame's intent for both players: the human from the keyboard,
-    // the bot from its AI. The sim is multiplayer-shaped — it steps from a map
-    // of per-player inputs and doesn't care which came from a keyboard.
-    const input = keyboard.sample();
-    const botInput = computeBotInput(world, BOT_ID);
-    const ctx = {
-      inputs: new Map([
-        [world.localPlayerId, input],
-        [BOT_ID, botInput],
-      ]),
-    };
-    const alpha = loop.advance(dt, ctx);
-    renderer.draw(world, alpha, dt);
+    // Send the local player's intent.
+    transport.sendInput(keyboard.sample());
 
-    // Drain this frame's sim events for the kill feed, then clear them. The
-    // renderer already consumed the same events for explosions; main owns the
-    // clear so every consumer sees them (architecture §4).
-    for (const e of world.events) {
-      if (e.type === "shipDied") feed.add(killLine(world, e.killer, e.victim), now);
+    // Bot AI reads the client world (last snapshot — zero-latency loopback so
+    // it's identical to the server world). Route bot input via the loopback
+    // escape hatch until the bot moves server-side in M2.7.
+    transport.sendInputAs(BOT_PLAYER_ID, computeBotInput(clientWorld, BOT_PLAYER_ID));
+
+    // Advance the authoritative sim. The snapshot handler fires synchronously
+    // inside this call, so clientWorld is up-to-date by the time we return.
+    const alpha = server.advance(dt);
+
+    // Draw from the client world — every pixel on screen has passed through the
+    // serialize → deserialize round-trip. If it plays like M1, the seam is correct.
+    renderer.draw(clientWorld, alpha, dt);
+
+    // Drain events: the snapshot handler populated clientWorld.events from the
+    // server's events for this tick. Kill-feed and renderer both consume them;
+    // main.ts owns the clear so every consumer sees them (architecture §4).
+    for (const e of clientWorld.events) {
+      if (e.type === "shipDied")
+        feed.add(killLine(clientWorld, e.killer, e.victim), now);
     }
-    world.events.length = 0;
+    clientWorld.events.length = 0;
     feed.render(now);
 
     // HUD (updated a few times a second).
@@ -88,20 +100,22 @@ async function main() {
       fpsAccum = 0;
       fpsFrames = 0;
     }
-    const me = world.localPlayer;
-    const k = me.kinematics;
-    const speed = Math.hypot(k.vx, k.vy);
-    const status = isAlive(me)
-      ? `energy ${me.resources.energy.toFixed(0)}`
-      : `RESPAWNING in ${((me.combat.respawnAt - world.tick) / TICK_HZ).toFixed(1)}s`;
-    hud.textContent =
-      `fps ${fps}  (sim ${TICK_HZ}Hz)\n` +
-      `pos ${k.x.toFixed(0)}, ${k.y.toFixed(0)}\n` +
-      `speed ${speed.toFixed(2)} px/tick\n` +
-      `${status}\n` +
-      `bounty ${me.combat.bounty}  score ${me.combat.score}  ` +
-      `${me.combat.kills}-${me.combat.deaths} (K-D)\n` +
-      `projectiles ${world.projectiles.length}`;
+    const me = clientWorld.localPlayer;
+    if (me) {
+      const k = me.kinematics;
+      const speed = Math.hypot(k.vx, k.vy);
+      const status = isAlive(me)
+        ? `energy ${me.resources.energy.toFixed(0)}`
+        : `RESPAWNING in ${((me.combat.respawnAt - clientWorld.tick) / TICK_HZ).toFixed(1)}s`;
+      hud.textContent =
+        `fps ${fps}  (sim ${TICK_HZ}Hz)\n` +
+        `pos ${k.x.toFixed(0)}, ${k.y.toFixed(0)}\n` +
+        `speed ${speed.toFixed(2)} px/tick\n` +
+        `${status}\n` +
+        `bounty ${me.combat.bounty}  score ${me.combat.score}  ` +
+        `${me.combat.kills}-${me.combat.deaths} (K-D)\n` +
+        `projectiles ${clientWorld.projectiles.length}`;
+    }
 
     requestAnimationFrame(frame);
   }

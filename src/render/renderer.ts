@@ -3,7 +3,7 @@ import { ASSETS } from "../assets";
 import { shipConfig } from "../config";
 import type { GameMap } from "../sim/gamemap";
 import { isAlive } from "../sim/player";
-import type { Player, Projectile } from "../sim/types";
+import type { Player } from "../sim/types";
 import type { World } from "../sim/world";
 import { EffectsLayer } from "./effects";
 import { NametagLayer } from "./nametags";
@@ -51,8 +51,9 @@ export class Renderer {
   private bursts!: EffectsLayer;
   // Player nametags (name + bounty), drawn above the ships.
   private nametags!: NametagLayer;
-  // When each live bomb last dropped a trail puff (real-time clock, ms).
-  private lastTrailEmit = new WeakMap<Projectile, number>();
+  // When each live bomb last dropped a trail puff (real-time clock, ms),
+  // keyed by projectile id so snapshot-replaced objects are tracked correctly.
+  private lastTrailEmit = new Map<number, number>();
   private clockMs = 0;
 
   /** Create the Pixi canvas, load textures, build the scene. */
@@ -180,9 +181,9 @@ export class Renderer {
     // trail looks the same regardless of frame rate.
     for (const p of world.projectiles) {
       if (p.kind !== "bomb") continue;
-      const last = this.lastTrailEmit.get(p);
+      const last = this.lastTrailEmit.get(p.id);
       if (last !== undefined && this.clockMs - last < TRAIL_EMIT_MS) continue;
-      this.lastTrailEmit.set(p, this.clockMs);
+      this.lastTrailEmit.set(p.id, this.clockMs);
       const x = lerp(p.prevX, p.x, alpha);
       const y = lerp(p.prevY, p.y, alpha);
       this.trails.spawn(this.trailFrames, x, y, TRAIL_FRAME_MS);

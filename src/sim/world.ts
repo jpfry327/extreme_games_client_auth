@@ -53,12 +53,18 @@ export class World {
    *  has no meaning; it's a client convenience that rides along on the world. */
   readonly localPlayerId: PlayerId = LOCAL_PLAYER_ID;
 
+  /** Monotonically increasing counter for stable projectile ids. Incremented by
+   *  the firing system each time a projectile is spawned, so snapshots can track
+   *  entities across ticks without relying on object identity (architecture §5). */
+  nextProjectileId = 0;
+
   constructor(
     public readonly map: GameMap,
     seed = 1,
+    addLocalPlayer = true,
   ) {
     this.rng = new SeededRng(seed);
-    this.addPlayer(LOCAL_PLAYER_ID, "Player", 0, WARBIRD);
+    if (addLocalPlayer) this.addPlayer(LOCAL_PLAYER_ID, "Player", 0, WARBIRD);
   }
 
   /** Convenience accessor for the client's own player. */

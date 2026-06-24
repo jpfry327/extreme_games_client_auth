@@ -15,11 +15,11 @@ export function firingSystem(world: World, ctx: StepContext): void {
     if (!input) continue;
 
     if (input.fire) {
-      const p = tryFire(player, "bullet");
+      const p = tryFire(world, player, "bullet");
       if (p) world.projectiles.push(p);
     }
     if (input.bomb) {
-      const p = tryFire(player, "bomb");
+      const p = tryFire(world, player, "bomb");
       if (p) world.projectiles.push(p);
     }
   }
@@ -27,8 +27,9 @@ export function firingSystem(world: World, ctx: StepContext): void {
 
 /** Fire one weapon if its cooldown is clear and there's energy for it. Returns
  *  the spawned projectile, or null if it couldn't fire. Mutates the player
- *  (debits energy, sets the cooldown). */
-function tryFire(player: Player, kind: ProjectileKind): Projectile | null {
+ *  (debits energy, sets the cooldown). Assigns a stable `id` from the world
+ *  counter so snapshots can track this projectile across ticks. */
+function tryFire(world: World, player: Player, kind: ProjectileKind): Projectile | null {
   const config = shipConfig(player.shipType);
   const weapon: WeaponConfig = kind === "bullet" ? config.bullet : config.bomb;
   const combat = player.combat;
@@ -52,6 +53,7 @@ function tryFire(player: Player, kind: ProjectileKind): Projectile | null {
   const y = k.y + fy * muzzle;
 
   return {
+    id: world.nextProjectileId++,
     kind,
     owner: player.id,
     x,

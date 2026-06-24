@@ -156,6 +156,7 @@ function projectileAt(
 ): Projectile {
   const w = kind === "bullet" ? shipConfig(WARBIRD).bullet : shipConfig(WARBIRD).bomb;
   return {
+    id: 0,
     kind,
     owner,
     x,
