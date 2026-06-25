@@ -62,7 +62,7 @@ export interface WelcomeMsg {
   playerId: PlayerId;
 }
 
-/** Full-state snapshot pushed at ~20Hz. The client applies it directly to the
+/** Full-state snapshot pushed at ~33Hz. The client applies it directly to the
  *  client world; prediction and interpolation are added in M2.4 / M2.2. */
 export interface SnapshotMsg {
   type: "snapshot";

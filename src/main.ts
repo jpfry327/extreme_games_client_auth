@@ -1,4 +1,4 @@
-import { NET, TICK_DT, TICK_HZ } from "./config";
+import { LAGCOMP, NET, TICK_DT, TICK_HZ } from "./config";
 import { Keyboard } from "./input/keyboard";
 import { keyboardLockSupported, toggleFullscreen } from "./input/fullscreen";
 import { loadMap } from "./map/loader";
@@ -7,11 +7,13 @@ import { World } from "./sim/world";
 import { Renderer } from "./render/renderer";
 import { WebSocketTransport } from "./net/WebSocketTransport";
 import { SimulatedTransport } from "./net/networkSimulator";
-import { SnapshotInterpolator } from "./net/interpolation";
+import { SnapshotInterpolator, pickStraddlingPair } from "./net/interpolation";
 import { RemoteProjectileSimulator } from "./net/remoteProjectiles";
 import { ClientInputManager } from "./net/clientInput";
 import { Predictor } from "./net/prediction";
 import { ReconciliationSmoother } from "./net/reconciliationSmoother";
+import { NetHealth } from "./net/netHealth";
+import { AdaptiveInterpDelay } from "./net/adaptiveInterp";
 
 // To run without a server (in-process loopback, M2.0 mode), swap the import
 // above for these two and uncomment the loopback block below:
@@ -29,7 +31,7 @@ async function main() {
 
   // 2. Create the view world — never stepped. The interpolator rebuilds it each
   //    frame from buffered snapshots, rendering remote entities ~interpDelay in
-  //    the past so they glide instead of snapping at the 20Hz broadcast rate.
+  //    the past so they glide instead of snapping at the ~33Hz broadcast rate.
   const view = new World(map, 1, false);
   const interp = new SnapshotInterpolator();
   // M2.8: remote players' projectiles are simulated deterministically (forward
@@ -51,6 +53,13 @@ async function main() {
   // render-offset that decays to zero, so a correction is a gentle pull instead
   // of a snap. Zero offset in steady state — adds no latency.
   const smoother = new ReconciliationSmoother();
+  // M2.11: network-health telemetry (jitter, snapshot loss/stalls, buffer depth,
+  // extrapolation/freeze + comp-clamp rates) for the debug overlay, and the
+  // interval/jitter feed for the adaptive interpolation delay below.
+  const health = new NetHealth();
+  // M2.11: drive the interpolation delay from the measured link instead of a fixed
+  // 75ms, so a jittery connection stops starving the buffer (remote ships jumping).
+  const adaptiveInterp = new AdaptiveInterpDelay(NET.adaptiveInterp, NET.interpDelayMs);
   // Latest server-reported input-queue depth for us (debug overlay only).
   let serverInputDepth = 0;
   // Latest server-measured RTT (ms) per player, from the snapshot — drives the
@@ -131,10 +140,14 @@ async function main() {
   transport.setSnapshotHandler((snap) => {
     // Drop out-of-order (stale) snapshots — jitter can deliver an older tick
     // after a newer one; we already hold something fresher (M2.5).
-    if (snap.tick <= newestSnapTick) return;
+    if (snap.tick <= newestSnapTick) {
+      health.onStaleSnapshot(); // M2.11
+      return;
+    }
     newestSnapTick = snap.tick;
 
     const now = performance.now();
+    health.onSnapshot(snap.tick, now); // M2.11: jitter + tick-gap loss tracking
     interp.push(snap, now);
     // M2.4 reconciliation: measure prediction error *before* the ack drops the
     // un-acked inputs (so this frame's replay still recorded the acked seq).
@@ -230,13 +243,21 @@ async function main() {
       return;
     }
 
+    // M2.11: ease the interpolation delay toward the measured link (snapshot
+    // spacing + jitter), then use this single value everywhere this frame
+    // (renderTick stamping, buildView, remote projectiles) so ships and bullets
+    // stay on one timeline. Falls back to the fixed NET.interpDelayMs when adaptive
+    // is off or before any snapshot timing exists.
+    adaptiveInterp.update(health.meanIntervalMs, health.jitterMs, dt);
+    const interpMs = adaptiveInterp.ms;
+
     // Produce one stamped command per elapsed sim tick (not per render frame)
     // and send every one, so the server gets a continuous, ordered stream. M2.9:
     // stamp the command with the server tick our render view corresponds to (the
     // ghost positions we're aiming at), so the server rewinds targets to exactly
     // this view when adjudicating our shots ("what you see is what you hit"). All
     // catch-up ticks this frame share it, like they share the keyboard sample.
-    const renderTick = interp.renderTick(now, NET.interpDelayMs, NET.extrapolateMaxMs);
+    const renderTick = interp.renderTick(now, interpMs, NET.extrapolateMaxMs);
     const sample = keyboard.sample();
     const stamped = renderTick !== null ? { ...sample, renderTick } : sample;
     for (const input of inputMgr.produce(dt, stamped, now)) {
@@ -251,7 +272,7 @@ async function main() {
     // interpolated ~interpDelay in the past (smooth); the local ship is pinned
     // to the latest snapshot (still laggy — M2.4 adds prediction). The pose is
     // baked in with prev*===current, so alpha is a no-op here.
-    interp.buildView(view, now, NET.interpDelayMs, view.localPlayerId, NET.extrapolateMaxMs);
+    interp.buildView(view, now, interpMs, view.localPlayerId, NET.extrapolateMaxMs);
 
     // M2.10: drop the delayed server copy of any *own* bomb explosion we already
     // drew from prediction. Only own-bomb (`owner === localId`) events are
@@ -293,7 +314,7 @@ async function main() {
     const remoteShots = remoteProjectiles.simulate(
       interp.snapshots,
       now,
-      NET.interpDelayMs,
+      interpMs,
       view.localPlayerId,
       NET.extrapolateMaxMs,
     );
@@ -352,11 +373,30 @@ async function main() {
     // aiming through. Plus a running count of hits the server awarded against a
     // rewound (past) pose — proof "what you see is what you hit" is firing.
     const predictedComp = predictor.predictedProjectiles.find((p) => (p.compTicks ?? 0) > 0)?.compTicks;
-    const compTicks =
-      predictedComp ?? (renderTick !== null ? Math.max(0, view.tick - renderTick) : 0);
+    // M2.11: the *un-clamped* rewind we'd want this frame (the view delay in ticks).
+    // The server clamps it to LAGCOMP.maxCompTicks; when raw exceeds the cap our
+    // shots are under-compensated — the "bombs hit but don't register" failure mode.
+    const rawCompTicks = renderTick !== null ? Math.max(0, view.tick - renderTick) : 0;
+    const compTicks = predictedComp ?? Math.min(rawCompTicks, LAGCOMP.maxCompTicks);
     const compMs = compTicks * TICK_DT * 1000;
+    const compClamped = rawCompTicks > LAGCOMP.maxCompTicks;
+
+    // M2.11: record this frame's health gauges, reading the buffer/extrapolation
+    // state from the same straddle the interpolator used (now − interpMs), and roll
+    // up the per-second event rates the overlay shows below.
+    const straddle = pickStraddlingPair(interp.snapshots, now - interpMs, NET.extrapolateMaxMs);
+    const extrapMs = straddle?.extrapMs ?? 0;
+    health.onFrame(dt, {
+      bufferDepth: interp.snapshots.length,
+      extrapMs,
+      frozen: extrapMs >= NET.extrapolateMaxMs - 0.5,
+      rawCompTicks,
+      compClamped,
+    });
+    const hps = health.perSecond;
+
     netdebug.textContent =
-      `── netcode (M2.9) ──\n` +
+      `── netcode (M2.11) ──\n` +
       `rtt ${inputMgr.rttMs.toFixed(0)}ms (ack)\n` +
       `acked seq ${inputMgr.lastAckedSeq}\n` +
       `client tick ${inputMgr.clientTickCount}\n` +
@@ -367,8 +407,14 @@ async function main() {
       `pred proj ${predictor.predictedProjectiles.length}\n` +
       `remote proj (sim) ${remoteShots.length}\n` +
       `smooth off ${smoother.offsetPx.toFixed(1)}px\n` +
-      `lagcomp ${compTicks}t (~${compMs.toFixed(0)}ms)  rewind hits ${rewindHitCount}\n` +
+      `lagcomp ${compTicks}t (~${compMs.toFixed(0)}ms)${compClamped ? " CLAMPED" : ""}  ` +
+      `rewind hits ${rewindHitCount}\n` +
       `pred booms ${predictedBoomCount}\n` +
+      `── link health (M2.11) ──\n` +
+      `snap interval ${health.meanIntervalMs.toFixed(0)}ms  jitter ±${health.jitterMs.toFixed(0)}ms\n` +
+      `interp delay ${interpMs.toFixed(0)}ms → ${adaptiveInterp.targetMs.toFixed(0)}ms  buf ${interp.snapshots.length}\n` +
+      `snaps/s ${hps.received}  loss/s ${hps.missed}  stale/s ${hps.stale}\n` +
+      `extrap/s ${hps.extrapFrames}  freeze/s ${hps.freezeFrames}  clamp/s ${hps.clampFrames}\n` +
       simLine;
 
     requestAnimationFrame(frame);

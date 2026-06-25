@@ -2,7 +2,7 @@
  * Headless game server — M2.1.
  *
  * Runs the authoritative World + FixedLoop at 100Hz and broadcasts snapshots
- * to all connected clients at ~20Hz (every BROADCAST_EVERY ticks). The sim
+ * to all connected clients at ~33Hz (every BROADCAST_EVERY ticks). The sim
  * rate and broadcast rate are intentionally decoupled: the game stays smooth
  * regardless of how many clients are serializing snapshots.
  *
@@ -33,7 +33,7 @@ import { loadMapSync } from "./loadMap";
 // Railway (and most PaaS hosts) inject the port to bind via process.env.PORT;
 // fall back to 3000 so `npm run server` keeps working locally with no env set.
 const PORT = parseInt(process.env.PORT ?? "3000", 10);
-/** Broadcast a snapshot every N sim ticks: 100 / 5 = 20 Hz. */
+/** Broadcast a snapshot every N sim ticks: 100 / 3 ≈ 33 Hz. */
 const BROADCAST_EVERY = 3;
 /** Measure each socket's round-trip time this often (ms) via WS ping/pong. */
 const PING_EVERY_MS = 1000;
@@ -236,7 +236,7 @@ setInterval(() => {
   ticksSinceBroadcast++;
   if (ticksSinceBroadcast >= BROADCAST_EVERY) {
     // Drain events on *broadcast*, not on *tick*. The sim runs at 100Hz but we
-    // only broadcast at 20Hz; clearing every tick (the old bug) wiped events
+    // only broadcast at ~33Hz; clearing every tick (the old bug) wiped events
     // produced on the 4 in-between ticks before any snapshot could carry them,
     // so kills/explosions/hits on those ticks never reached the client. Letting
     // world.events accumulate across the whole broadcast window and clearing it

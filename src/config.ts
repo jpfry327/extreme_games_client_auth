@@ -171,13 +171,48 @@ export const COMBAT = {
 export const NET = {
   /** How far in the past (ms) remote entities are rendered, so the client always
    *  has two buffered snapshots straddling render time to interpolate between.
-   *  ~100ms ≈ two snapshots at the 20Hz broadcast rate. Bigger = smoother under
+   *  ~2 snapshots at the ~33Hz broadcast rate (≈30ms gap). Bigger = smoother under
    *  jitter but more visible lag on other ships. (roadmap M2.2 / architecture §5.2)
    *
    *  Failure mode it guards: too small and a single late/jittered snapshot leaves
-   *  the buffer empty at render time, forcing extrapolation (below). Tuned against
-   *  the network simulator to sit ~one jitter-spike above the 50ms broadcast gap. */
+   *  the buffer empty at render time, forcing extrapolation (below).
+   *
+   *  M2.11: this is now the **initial / fallback** value. When `adaptiveInterp` is
+   *  enabled the live delay is driven from measured snapshot spacing + jitter (see
+   *  `AdaptiveInterpDelay`), starting here and clamped to `[minMs, maxMs]`; with it
+   *  off, this fixed value is used as before. */
   interpDelayMs: 75,
+
+  /** Adaptive interpolation delay (M2.11). Instead of a fixed `interpDelayMs`, the
+   *  client raises/lowers the delay to track the link: enough buffer to always have
+   *  a straddling snapshot pair (≈ spacing) plus a jitter cushion, so a jittery
+   *  connection stops starving the buffer (the "remote ships jump" symptom) without
+   *  permanently over-delaying a clean one.
+   *
+   *    target = clamp(meanIntervalMs * spacingFactor + jitterMs * jitterFactor,
+   *                   minMs, maxMs)
+   *
+   *  The live value eases toward `target` with an asymmetric half-life — raise fast
+   *  (avoid starvation now), lower slowly (don't add-then-remove lag on every
+   *  jitter blip), so the delay itself never visibly time-warps the remote ships. */
+  adaptiveInterp: {
+    enabled: true,
+    /** Floor (ms): never tighter than ~2 broadcast gaps at 33Hz. */
+    minMs: 50,
+    /** Ceiling (ms): cap the added lag; beyond this a link is just bad. Stays
+     *  within the lag-comp rewind budget so shots keep registering. */
+    maxMs: 200,
+    /** Multiple of the mean snapshot interval to buffer (≥1 → always a newer
+     *  sample to interpolate toward; 1.5 leaves half a gap of slack). */
+    spacingFactor: 1.5,
+    /** Multiple of measured jitter to add as cushion above the spacing term. */
+    jitterFactor: 2,
+    /** Half-life (ms) for *raising* the delay — fast, to outrun a starving buffer. */
+    raiseHalfLifeMs: 150,
+    /** Half-life (ms) for *lowering* it — slow, so transient jitter doesn't make
+     *  the delay itself jitter. */
+    lowerHalfLifeMs: 3000,
+  },
 
   /** When the snapshot buffer starves (a lag spike or a run of dropped snapshots
    *  leaves no sample newer than render time), remote entities are dead-reckoned
@@ -236,12 +271,17 @@ export const LAGCOMP = {
    *  a very laggy — or spoofed — client can't reach arbitrarily far into the past,
    *  and — more importantly for *feel* — it bounds the "I dodged behind cover and
    *  still got hit" unfairness the rewind imposes on the *victim* (the cost lag
-   *  comp pays to make the shooter feel instant). 15t = 150ms, the bottom of the
-   *  roadmap's 150–250ms band: still comfortably covers interpDelay (~7.5t @75ms)
-   *  + a ~75ms one-way link, so an 80–150ms-RTT player's shots still register,
-   *  while a player above ~150ms RTT trades back to some under-compensation
-   *  (bombs starting to pass through again) rather than inflicting a larger
-   *  victim-side dodge-then-die window. Also implicitly capped by `historyTicks-1`
-   *  (you can't rewind past what's recorded). */
-  maxCompTicks: 15,
+   *  comp pays to make the shooter feel instant).
+   *
+   *  25t = 250ms (top of the roadmap's 150–250ms band, and what CLAUDE.md
+   *  documents). M2.11 raised this from 15t (150ms) after the live ~100ms-RTT test:
+   *  the real *view* delay a shot must compensate is `interpDelayMs` (~75ms, now up
+   *  to `adaptiveInterp.maxMs` 200ms under jitter) **plus the full RTT**, i.e.
+   *  ~175ms at 100ms RTT — which the old 150ms cap clamped *below*, so connecting
+   *  shots were under-rewound and eaten ("bombs hit but don't register"). 250ms
+   *  covers interp + a ~150ms-RTT link with margin; players past that trade back to
+   *  some under-compensation rather than a larger victim-side dodge-then-die window.
+   *  Also implicitly capped by `historyTicks-1` (you can't rewind past what's
+   *  recorded; 120t = 1.2s leaves ample room). */
+  maxCompTicks: 25,
 } as const;

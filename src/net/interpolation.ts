@@ -1,9 +1,9 @@
 /**
  * Client-side snapshot interpolation — M2.2.
  *
- * The server broadcasts full snapshots at ~20Hz but the renderer runs at ~60fps,
- * so applying each snapshot directly makes every entity snap 20×/sec. This module
- * smooths that out by rendering remote entities **~100ms in the past**,
+ * The server broadcasts full snapshots at ~33Hz but the renderer runs at ~60fps,
+ * so applying each snapshot directly makes every entity snap 33×/sec. This module
+ * smooths that out by rendering remote entities **~interpDelay in the past**,
  * interpolating between the two buffered snapshots that straddle that render time
  * (the canonical Source-engine approach — architecture §5.2, roadmap M2.2).
  *
@@ -100,10 +100,10 @@ export function pickStraddlingPair(
   return { a, b, t, extrapMs: 0 };
 }
 
-/** How many snapshots to retain. At 20Hz that's ~1.5s of history — far more than
- *  the ~100ms interpolation window needs, leaving margin for jitter / lag spikes
+/** How many snapshots to retain. At ~33Hz that's ~0.9s of history — far more than
+ *  the interpolation window needs, leaving margin for jitter / lag spikes
  *  while still bounding memory. (Edge case: if the tab is backgrounded for
- *  >1.5s, rAF pauses while snapshots keep arriving, so un-rendered snapshots are
+ *  ~1s, rAF pauses while snapshots keep arriving, so un-rendered snapshots are
  *  trimmed here and their events are lost — cosmetic only, acceptable.) */
 const MAX_BUFFER = 30;
 
@@ -214,7 +214,7 @@ export class SnapshotInterpolator {
     // --- events: release each snapshot's events once, in interpolated time ---
     // The watermark is a strict `>`: two snapshots sharing an identical
     // receivedAt (same performance.now() tick) would drop the second's events,
-    // but at 20Hz that collision effectively never happens.
+    // but at ~33Hz that collision effectively never happens.
     view.events.length = 0;
     for (const buf of this.buffer) {
       if (buf.receivedAt > this.lastEventTime && buf.receivedAt <= renderTime) {

@@ -188,7 +188,7 @@ explicit decision gate. Each is one Claude Code session and ends in a runnable,
 
 ---
 
-### M2.11 — Measure & tune (diagnostics + the cheap wins)
+### M2.11 — Measure & tune (diagnostics + the cheap wins)  ✓
 
 **Goal:** before any rewrite, instrument the live build and exhaust the
 zero-architecture-change wins — they may make 100ms playable on their own, and
@@ -196,29 +196,36 @@ either way they produce the data that says whether the transport rewrite below i
 worth it. **Do this first; it's free and it's the diagnosis.**
 
 **Scope:**
-- [ ] **HUD network-health panel:** measured RTT, snapshot inter-arrival jitter,
-      snapshot loss/stall count, interp-buffer depth, extrapolation/freeze events
-      per second, and **clamp counts** (how often `compTicks` hits its cap). This
-      is the diagnosis tool for everything below.
-- [ ] **Fix the lag-comp cap.** `LAGCOMP.maxCompTicks` is 15t (150ms) in code, but
-      the real view delay at ~100ms RTT is `interpDelayMs` (75ms) + ~RTT ≈ 175ms,
-      so connecting shots are under-rewound and eaten. Raise/validate the cap to
-      cover interp + real RTT (the 120t history ring already affords ~1.2s);
-      re-document the favour-the-shooter trade at the new value.
-- [ ] **Adaptive interpolation delay.** Drive `interpDelayMs` from measured jitter
-      + snapshot spacing rather than a fixed 75ms, so the buffer stops starving
-      (the "remote ships jump" symptom) on a jittery link; clamp to a sane
-      floor/ceiling.
-- [ ] **Reconcile constant/doc drift:** `BROADCAST_EVERY = 3` is ~33Hz (its comment
-      says 20Hz); `CLAUDE.md`/this roadmap say `maxCompTicks` = 25t/250ms but the
-      code is 15t. Make code and docs agree.
-- [ ] Re-measure at 100ms with the network simulator set to match the live link.
+- [x] **HUD network-health panel:** a "link health" block on the netcode overlay —
+      snapshot inter-arrival interval + jitter, the live→target adaptive interp
+      delay and buffer depth, and per-second rates for snapshot loss/stale and
+      extrapolation/freeze/comp-clamp events; the `lagcomp` line shows `CLAMPED`
+      when the wanted rewind exceeds the cap. (`net/netHealth.ts`, wired in
+      `main.ts`; RTT/ack lines already existed from M2.3/M2.7.)
+- [x] **Fix the lag-comp cap.** `LAGCOMP.maxCompTicks` raised 15t (150ms) → **25t
+      (250ms)** so a ~100ms-RTT shot's real view delay (`interpDelayMs` + RTT ≈
+      175ms, up to ~interp 200ms + RTT under jitter) is covered instead of clamped;
+      the 120t history ring covers it. Favour-the-shooter trade re-documented.
+- [x] **Adaptive interpolation delay.** `interpDelayMs` is now the initial/fallback;
+      the live delay is driven from measured snapshot spacing + jitter
+      (`net/adaptiveInterp.ts`), raised fast / lowered slow, clamped to
+      `[minMs, maxMs]`, so a jittery link stops starving the buffer (the "remote
+      ships jump" symptom).
+- [x] **Reconcile constant/doc drift:** `BROADCAST_EVERY` comment fixed to ~33Hz
+      (was "20Hz"); `maxCompTicks` code now matches the 25t/250ms in `CLAUDE.md`;
+      stale "20Hz" comments across `protocol.ts`/`interpolation.ts`/`main.ts`
+      updated. Overlay/`CLAUDE.md` bumped to M2.11.
+- [ ] Re-measure at 100ms with the network simulator set to match the live link —
+      **owner action:** open the build, set #netsim to ~80±30ms / 3% loss (≈ the
+      Railway link), and read the new overlay to confirm clamps drop and the buffer
+      stops starving. Unit/typecheck/build all green.
 
 **Out of scope:** transport change, serialization change, AOI culling.
 
 **Playable end state:** the same architecture, but quantified — you can *see*
-whether stalls or under-compensation dominate, and the cheap tuning has recovered
-whatever it can. **This is the decision input for M2.12.**
+whether stalls or under-compensation dominate, and the cheap tuning (wider rewind
+cap + adaptive delay) has recovered whatever it can without a rewrite. **This is
+the decision input for M2.12.**
 
 ---
 
