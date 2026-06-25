@@ -11,7 +11,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { WARBIRD } from "../config";
+import { LAGCOMP, WARBIRD } from "../config";
 import { GameMap } from "./gamemap";
 import { TickHistory } from "./history";
 import { createPlayer } from "./player";
@@ -113,8 +113,11 @@ describe("firing stamps lag-compensation onto shots", () => {
   });
 
   it("clamps the rewind to the configured maximum", () => {
-    // 30 idle ticks → spawn at tick 31; renderTick 0 → raw 31, clamped to 25.
-    expect(fireWith(30, 0).compTicks).toBe(25);
+    // Spawn far enough past the maximum that the raw gap (spawnTick − renderTick)
+    // exceeds the cap, then assert it clamps to LAGCOMP.maxCompTicks (read from
+    // config so tuning the cap doesn't break this test).
+    const idle = LAGCOMP.maxCompTicks + 20;
+    expect(fireWith(idle, 0).compTicks).toBe(LAGCOMP.maxCompTicks);
   });
 });
 
