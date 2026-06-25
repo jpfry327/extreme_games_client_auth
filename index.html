@@ -56,10 +56,11 @@
         pointer-events: none;
         text-shadow: 0 0 2px #000;
       }
-      /* M2.5 network-simulator controls — below the netdebug readout. */
+      /* M2.5 network-simulator controls — pinned bottom-right, clear of the
+         netdebug readout (top-right) so the two never overlap. */
       #netsim {
         position: fixed;
-        top: 168px;
+        bottom: 8px;
         right: 8px;
         color: #6cf;
         font: 11px/1.6 monospace;

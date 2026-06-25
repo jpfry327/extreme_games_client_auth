@@ -1,4 +1,4 @@
-import { NET, TICK_DT, TICK_HZ } from "./config";
+import { LAGCOMP, NET, TICK_DT, TICK_HZ } from "./config";
 import { Keyboard } from "./input/keyboard";
 import { keyboardLockSupported, toggleFullscreen } from "./input/fullscreen";
 import { loadMap } from "./map/loader";
@@ -7,11 +7,13 @@ import { World } from "./sim/world";
 import { Renderer } from "./render/renderer";
 import { WebSocketTransport } from "./net/WebSocketTransport";
 import { SimulatedTransport } from "./net/networkSimulator";
-import { SnapshotInterpolator } from "./net/interpolation";
+import { SnapshotInterpolator, pickStraddlingPair } from "./net/interpolation";
 import { RemoteProjectileSimulator } from "./net/remoteProjectiles";
 import { ClientInputManager } from "./net/clientInput";
 import { Predictor } from "./net/prediction";
 import { ReconciliationSmoother } from "./net/reconciliationSmoother";
+import { NetHealth } from "./net/netHealth";
+import { AdaptiveInterpDelay } from "./net/adaptiveInterp";
 
 // To run without a server (in-process loopback, M2.0 mode), swap the import
 // above for these two and uncomment the loopback block below:
@@ -29,7 +31,7 @@ async function main() {
 
   // 2. Create the view world — never stepped. The interpolator rebuilds it each
   //    frame from buffered snapshots, rendering remote entities ~interpDelay in
-  //    the past so they glide instead of snapping at the 20Hz broadcast rate.
+  //    the past so they glide instead of snapping at the ~33Hz broadcast rate.
   const view = new World(map, 1, false);
   const interp = new SnapshotInterpolator();
   // M2.8: remote players' projectiles are simulated deterministically (forward
@@ -51,8 +53,13 @@ async function main() {
   // render-offset that decays to zero, so a correction is a gentle pull instead
   // of a snap. Zero offset in steady state — adds no latency.
   const smoother = new ReconciliationSmoother();
-  // Latest server-reported input-queue depth for us (debug overlay only).
-  let serverInputDepth = 0;
+  // M2.11: network-health telemetry (jitter, snapshot loss/stalls, buffer depth,
+  // extrapolation/freeze + comp-clamp rates) for the debug overlay, and the
+  // interval/jitter feed for the adaptive interpolation delay below.
+  const health = new NetHealth();
+  // M2.11: drive the interpolation delay from the measured link instead of a fixed
+  // 75ms, so a jittery connection stops starving the buffer (remote ships jumping).
+  const adaptiveInterp = new AdaptiveInterpDelay(NET.adaptiveInterp, NET.interpDelayMs);
   // Latest server-measured RTT (ms) per player, from the snapshot — drives the
   // ping shown on nametags (M2.7).
   let latestPings: Record<string, number> = {};
@@ -63,8 +70,6 @@ async function main() {
   let newestSnapTick = -1;
   // M2.9 debug counter: total hits the server awarded via lag-comp rewind.
   let rewindHitCount = 0;
-  // M2.10 debug counter: own-bomb explosions drawn from prediction (instant).
-  let predictedBoomCount = 0;
   // M2.10: local bomb detonations we've already drawn from prediction (instant),
   // so the delayed server copy of the same explosion can be suppressed instead of
   // drawn a second time. Each entry expires on its own in case the server copy
@@ -131,10 +136,14 @@ async function main() {
   transport.setSnapshotHandler((snap) => {
     // Drop out-of-order (stale) snapshots — jitter can deliver an older tick
     // after a newer one; we already hold something fresher (M2.5).
-    if (snap.tick <= newestSnapTick) return;
+    if (snap.tick <= newestSnapTick) {
+      health.onStaleSnapshot(); // M2.11
+      return;
+    }
     newestSnapTick = snap.tick;
 
     const now = performance.now();
+    health.onSnapshot(snap.tick, now); // M2.11: jitter + tick-gap loss tracking
     interp.push(snap, now);
     // M2.4 reconciliation: measure prediction error *before* the ack drops the
     // un-acked inputs (so this frame's replay still recorded the acked seq).
@@ -156,7 +165,6 @@ async function main() {
     } else {
       inputMgr.ack(snap.lastProcessedInputSeq, now);
     }
-    serverInputDepth = snap.inputBufferDepth;
     latestPings = snap.pings;
   });
 
@@ -230,13 +238,21 @@ async function main() {
       return;
     }
 
+    // M2.11: ease the interpolation delay toward the measured link (snapshot
+    // spacing + jitter), then use this single value everywhere this frame
+    // (renderTick stamping, buildView, remote projectiles) so ships and bullets
+    // stay on one timeline. Falls back to the fixed NET.interpDelayMs when adaptive
+    // is off or before any snapshot timing exists.
+    adaptiveInterp.update(health.meanIntervalMs, health.jitterMs, dt);
+    const interpMs = adaptiveInterp.ms;
+
     // Produce one stamped command per elapsed sim tick (not per render frame)
     // and send every one, so the server gets a continuous, ordered stream. M2.9:
     // stamp the command with the server tick our render view corresponds to (the
     // ghost positions we're aiming at), so the server rewinds targets to exactly
     // this view when adjudicating our shots ("what you see is what you hit"). All
     // catch-up ticks this frame share it, like they share the keyboard sample.
-    const renderTick = interp.renderTick(now, NET.interpDelayMs, NET.extrapolateMaxMs);
+    const renderTick = interp.renderTick(now, interpMs, NET.extrapolateMaxMs);
     const sample = keyboard.sample();
     const stamped = renderTick !== null ? { ...sample, renderTick } : sample;
     for (const input of inputMgr.produce(dt, stamped, now)) {
@@ -251,7 +267,7 @@ async function main() {
     // interpolated ~interpDelay in the past (smooth); the local ship is pinned
     // to the latest snapshot (still laggy — M2.4 adds prediction). The pose is
     // baked in with prev*===current, so alpha is a no-op here.
-    interp.buildView(view, now, NET.interpDelayMs, view.localPlayerId, NET.extrapolateMaxMs);
+    interp.buildView(view, now, interpMs, view.localPlayerId, NET.extrapolateMaxMs);
 
     // M2.10: drop the delayed server copy of any *own* bomb explosion we already
     // drew from prediction. Only own-bomb (`owner === localId`) events are
@@ -282,7 +298,6 @@ async function main() {
       for (const boom of predictor.drainNewExplosions()) {
         view.events.push({ type: "bombExploded", x: boom.x, y: boom.y, owner: view.localPlayerId });
         shownLocalBooms.push({ x: boom.x, y: boom.y, expiresMs: now + BOOM_TTL_MS });
-        predictedBoomCount++;
       }
     }
 
@@ -293,7 +308,7 @@ async function main() {
     const remoteShots = remoteProjectiles.simulate(
       interp.snapshots,
       now,
-      NET.interpDelayMs,
+      interpMs,
       view.localPlayerId,
       NET.extrapolateMaxMs,
     );
@@ -337,39 +352,46 @@ async function main() {
         `projectiles ${view.projectiles.length}`;
     }
 
-    // Netcode debug overlay (M2.3) — the verification tool for M2.4–M2.6.
-    // `view.tick` is the newest snapshot's server tick; the client tick is our
-    // own input clock. Their gap = how far ahead the client is sampling. The
-    // server buffer depth should sit at a small steady value (one snapshot's
-    // worth of commands); ~0 means starvation, a growing number means lag.
-    const sim = transport.params;
-    const simLine = sim.enabled
-      ? `netsim ${sim.latencyMs}±${sim.jitterMs}ms ${sim.lossPct}% loss`
-      : `netsim off`;
-    // M2.9: the rewind our shots carry. When we have predicted shots in flight,
-    // their stamped `compTicks` is the exact server value (the predicted world
-    // ticks at ~server-present); otherwise estimate from the view tick we're
-    // aiming through. Plus a running count of hits the server awarded against a
-    // rewound (past) pose — proof "what you see is what you hit" is firing.
+    // Netcode debug overlay — streamlined for the M2.12 decision (roadmap): is the
+    // pain TCP loss/stalls (→ UDP transport) or just tuning we can still do? The
+    // headline rows are `loss/stale` (snapshots the wire dropped / reordered — the
+    // TCP head-of-line signal) and `extrap/freeze` (buffer starvation, the "ships
+    // jump" symptom). `lagcomp …ms` + `clamp` show whether shots are still
+    // under-compensated; `pred err` is prediction health. Per-milestone verification
+    // detail (seqs, ticks, queue depths, proj counts) lived here through M2.10 — see
+    // git history if a regression needs it back.
+
+    // The rewind our shots carry: a predicted shot in flight carries the exact
+    // server `compTicks`; otherwise show the un-clamped view delay clamped to the
+    // cap. `compClamped` flags when the wanted rewind exceeds LAGCOMP.maxCompTicks —
+    // the "bombs hit but don't register" failure mode.
     const predictedComp = predictor.predictedProjectiles.find((p) => (p.compTicks ?? 0) > 0)?.compTicks;
-    const compTicks =
-      predictedComp ?? (renderTick !== null ? Math.max(0, view.tick - renderTick) : 0);
+    const rawCompTicks = renderTick !== null ? Math.max(0, view.tick - renderTick) : 0;
+    const compTicks = predictedComp ?? Math.min(rawCompTicks, LAGCOMP.maxCompTicks);
     const compMs = compTicks * TICK_DT * 1000;
+    const compClamped = rawCompTicks > LAGCOMP.maxCompTicks;
+
+    // Record this frame's health gauges (buffer/extrapolation from the same straddle
+    // the interpolator used) and roll up the per-second rates shown below.
+    const straddle = pickStraddlingPair(interp.snapshots, now - interpMs, NET.extrapolateMaxMs);
+    const extrapMs = straddle?.extrapMs ?? 0;
+    health.onFrame(dt, {
+      bufferDepth: interp.snapshots.length,
+      extrapMs,
+      frozen: extrapMs >= NET.extrapolateMaxMs - 0.5,
+      rawCompTicks,
+      compClamped,
+    });
+    const hps = health.perSecond;
+
     netdebug.textContent =
-      `── netcode (M2.9) ──\n` +
-      `rtt ${inputMgr.rttMs.toFixed(0)}ms (ack)\n` +
-      `acked seq ${inputMgr.lastAckedSeq}\n` +
-      `client tick ${inputMgr.clientTickCount}\n` +
-      `server tick ${view.tick}\n` +
-      `input buf (server) ${serverInputDepth}\n` +
-      `un-acked (client) ${inputMgr.pendingCount}\n` +
-      `pred err ${predictor.predictionErrorPx.toFixed(1)}px\n` +
-      `pred proj ${predictor.predictedProjectiles.length}\n` +
-      `remote proj (sim) ${remoteShots.length}\n` +
-      `smooth off ${smoother.offsetPx.toFixed(1)}px\n` +
-      `lagcomp ${compTicks}t (~${compMs.toFixed(0)}ms)  rewind hits ${rewindHitCount}\n` +
-      `pred booms ${predictedBoomCount}\n` +
-      simLine;
+      `── netcode (M2.11) ──\n` +
+      `rtt ${inputMgr.rttMs.toFixed(0)}ms  jitter ±${health.jitterMs.toFixed(0)}ms\n` +
+      `interp ${interpMs.toFixed(0)}ms  buf ${interp.snapshots.length}\n` +
+      `loss ${hps.missed}/s  stale ${hps.stale}/s\n` +
+      `extrap ${hps.extrapFrames}/s  freeze ${hps.freezeFrames}/s\n` +
+      `lagcomp ${compMs.toFixed(0)}ms${compClamped ? " CLAMPED" : ""}  clamp ${hps.clampFrames}/s\n` +
+      `rewind ${rewindHitCount}  pred err ${predictor.predictionErrorPx.toFixed(1)}px`;
 
     requestAnimationFrame(frame);
   }

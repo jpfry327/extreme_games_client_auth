@@ -77,10 +77,12 @@ Snapshots are **per-client** (`serializeSnapshotFor(world, playerId)`), which is
 
 ## Current milestone status
 
-Per `docs/roadmap.md`, M2.9 (server-side lag compensation) is complete — the full
-standard netcode model is now in place. The sequence is:
+Per `docs/roadmap.md`, the full standard netcode model (M2.0–M2.10) is complete, and
+the M2.11 responsiveness/efficiency pass is underway. The sequence is:
 ```
-M0 ✓ → M1 ✓ → M2.0 ✓ → M2.1 ✓ → M2.2 ✓ → M2.3 ✓ → M2.4 ✓ → M2.5 ✓ → M2.6 ✓ → M2.7 ✓ → M2.8 ✓ → M2.9 ✓ → M3 (UI) → ...
+M0 ✓ → M1 ✓ → M2.0–M2.10 ✓ (full netcode model)
+     → M2.11 ✓ (measure & tune) → M2.12 UDP transport → M2.13 binary+delta
+     → M2.14 AOI/stealth → M2.15 input batching → M3 (UI) → ...
 ```
 
 The three legs of the model: **client prediction** (own ship/shots at present — M2.4/M2.6),
@@ -106,8 +108,17 @@ present, so shots sailed through the drawn ghost). The pieces:
   damage to a mover. Hits/damage stay 100% server-authoritative — no predicted kills, no rollback of
   consequences. `ShipHitEvent.rewound` flags rewind hits.
 
-The netcode debug overlay is at M2.9 and adds `lagcomp Nt (~Nms)  rewind hits N` alongside the
-M2.5 `smooth off Npx` / `netsim …` lines.
+The netcode debug overlay is at M2.11. Alongside the M2.5 `smooth off Npx` / `netsim …` and
+M2.9 `lagcomp Nt (~Nms) rewind hits N` lines, it has a **link-health** block: snapshot
+interval + jitter, the live→target adaptive interp delay and buffer depth, and per-second
+rates for snapshot loss/stale and extrapolation/freeze/comp-clamp events. `compTicks` shows
+`CLAMPED` when the desired rewind exceeds `LAGCOMP.maxCompTicks` (shots under-compensated).
+
+M2.11 also: **raised `LAGCOMP.maxCompTicks` 15t→25t (250ms)** so a ~100ms-RTT shot's full view
+delay (`interpDelayMs` + RTT ≈ 175ms) is covered rather than clamped (the "bombs hit but don't
+register" bug); **made the interpolation delay adaptive** (`net/adaptiveInterp.ts`, driven by
+`net/netHealth.ts`) so a jittery link stops starving the buffer; and reconciled the
+broadcast-rate doc drift (~33Hz, not 20Hz).
 
 ## Key constraints
 
