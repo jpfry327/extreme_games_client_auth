@@ -227,8 +227,11 @@ export interface ShipHitEvent {
   /** M2.9: this hit was awarded by lag compensation — the overlap was tested
    *  against the target's rewound (historical) pose, not its present one. Lets the
    *  client distinguish a "what you saw is what you hit" rewind hit from a present
-   *  hit. Always false for bomb-splash damage (the area blast stays present-based,
-   *  a documented first-cut choice). */
+   *  hit. Set for both direct bullet hits and bomb-splash damage: the blast is
+   *  rewound to the firer's view too (see `detonateBomb`), since a Subspace bomb
+   *  deals all its damage through splash and a present-based blast would miss the
+   *  very moving targets lag comp exists to let you hit. False only when the test
+   *  fell back to the present pose (no `compTicks`, or the history slot evicted). */
   rewound: boolean;
 }
 

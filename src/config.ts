@@ -233,8 +233,15 @@ export const LAGCOMP = {
 
   /** Hard cap on a single projectile's `compTicks` (ticks). The dial on the
    *  favour-the-shooter trade: it bounds how far back a target can be rewound, so
-   *  a very laggy — or spoofed — client can't reach arbitrarily far into the past.
-   *  25t = 250ms, the top of the roadmap's 150–250ms band. Also implicitly capped
-   *  by `historyTicks - 1` (you can't rewind past what's recorded). */
-  maxCompTicks: 25,
+   *  a very laggy — or spoofed — client can't reach arbitrarily far into the past,
+   *  and — more importantly for *feel* — it bounds the "I dodged behind cover and
+   *  still got hit" unfairness the rewind imposes on the *victim* (the cost lag
+   *  comp pays to make the shooter feel instant). 15t = 150ms, the bottom of the
+   *  roadmap's 150–250ms band: still comfortably covers interpDelay (~7.5t @75ms)
+   *  + a ~75ms one-way link, so an 80–150ms-RTT player's shots still register,
+   *  while a player above ~150ms RTT trades back to some under-compensation
+   *  (bombs starting to pass through again) rather than inflicting a larger
+   *  victim-side dodge-then-die window. Also implicitly capped by `historyTicks-1`
+   *  (you can't rewind past what's recorded). */
+  maxCompTicks: 15,
 } as const;
