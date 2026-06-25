@@ -153,6 +153,13 @@ export interface Projectile {
 
   prevX: number;
   prevY: number;
+
+  /** Client-only prediction tag (M2.6): the input `seq` that spawned this
+   *  projectile while replaying un-acked inputs. Used to give a predicted shot a
+   *  stable view id across the predictor's per-frame rebuild. Never set by the
+   *  sim (`World.step` ignores it) — set by the client `Predictor` only, so it
+   *  doesn't affect server determinism. Absent on authoritative projectiles. */
+  spawnSeq?: number;
 }
 
 /** A projectile↔ship overlap found by the collision system (step 6) and consumed

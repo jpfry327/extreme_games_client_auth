@@ -134,6 +134,10 @@ export class SnapshotInterpolator {
     const olderProj = new Map(a.snap.projectiles.map((p) => [p.id, p]));
     view.projectiles.length = 0;
     for (const bp of b.snap.projectiles) {
+      // The local player's own shots are rendered from the predictor (M2.6),
+      // pinned to the leading edge — skip them here so they aren't also drawn
+      // ~interpDelay in the past (which would double them and pop at handoff).
+      if (bp.owner === localPlayerId) continue;
       const ap = olderProj.get(bp.id);
       const x = (ap ? lerp(ap.x, bp.x, t) : bp.x) + bp.vx * extrapTicks;
       const y = (ap ? lerp(ap.y, bp.y, t) : bp.y) + bp.vy * extrapTicks;

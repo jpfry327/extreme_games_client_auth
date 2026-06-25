@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { GameMap } from "../sim/gamemap";
-import type { InputCommand, Player, StepContext } from "../sim/types";
+import type { InputCommand, Player, Projectile, StepContext } from "../sim/types";
 import { LOCAL_PLAYER_ID, World } from "../sim/world";
 import { Predictor } from "./prediction";
 import type { SequencedInput } from "./protocol";
@@ -42,7 +42,7 @@ describe("Predictor", () => {
     const auth = structuredClone(ref.localPlayer);
 
     const predictor = new Predictor(openMap());
-    predictor.setAuthoritative(auth, ref.tick);
+    predictor.setAuthoritative(auth, [],ref.tick);
     const predicted = predictor.predict([], LOCAL_PLAYER_ID)!;
 
     expect(predicted.kinematics.x).toBe(auth.kinematics.x);
@@ -66,7 +66,7 @@ describe("Predictor", () => {
     }
 
     const predictor = new Predictor(openMap());
-    predictor.setAuthoritative(auth, authTick);
+    predictor.setAuthoritative(auth, [],authTick);
     const predicted = predictor.predict(unacked, LOCAL_PLAYER_ID)!;
 
     // Pure sim + same inputs ⇒ bit-identical pose.
@@ -92,7 +92,7 @@ describe("Predictor", () => {
     }
 
     const predictor = new Predictor(openMap());
-    predictor.setAuthoritative(auth, authTick);
+    predictor.setAuthoritative(auth, [],authTick);
     predictor.predict(unacked, LOCAL_PLAYER_ID);
 
     // The server acks an interior seq; predicted vs authoritative must match.
@@ -115,7 +115,7 @@ describe("Predictor", () => {
 
     const unacked = [seqInput(ref.tick + 1, script(5))];
     const predictor = new Predictor(openMap());
-    predictor.setAuthoritative(auth, ref.tick);
+    predictor.setAuthoritative(auth, [],ref.tick);
     const predicted = predictor.predict(unacked, LOCAL_PLAYER_ID)!;
 
     // Hand it an authoritative pose offset by a 3-4-5 triangle from prediction.
@@ -124,5 +124,118 @@ describe("Predictor", () => {
     disagreeing.kinematics.y += 4;
     predictor.measureError(disagreeing, unacked[0].seq);
     expect(predictor.predictionErrorPx).toBeCloseTo(5, 6);
+  });
+});
+
+// --- M2.6: own-weapon prediction ---------------------------------------------
+
+/** Assert two projectiles share flight state (ignoring id, which differs between
+ *  predicted negative ids and authoritative positive ids). */
+function expectSamePose(a: Projectile, b: Projectile): void {
+  expect(a.x).toBe(b.x);
+  expect(a.y).toBe(b.y);
+  expect(a.vx).toBe(b.vx);
+  expect(a.vy).toBe(b.vy);
+  expect(a.kind).toBe(b.kind);
+}
+
+describe("Predictor — projectiles", () => {
+  it("replay-spawns own shots from un-acked fire inputs, matching the server bit-for-bit", () => {
+    // Warm up with no firing, snapshot, then keep firing — those continued steps
+    // are the client's un-acked inputs. The reference world is the server.
+    const ref = new World(openMap(), 1);
+    for (let t = 0; t < 10; t++) ref.step(ctx(IDLE));
+    const auth = structuredClone(ref.localPlayer);
+    const authTick = ref.tick;
+
+    const unacked: SequencedInput[] = [];
+    for (let t = 10; t < 25; t++) {
+      const c = cmd({ fire: true });
+      ref.step(ctx(c));
+      unacked.push(seqInput(ref.tick, c));
+    }
+    // Sanity: the firing actually produced shots (cooldown lets a few through).
+    expect(ref.projectiles.length).toBeGreaterThan(0);
+
+    const predictor = new Predictor(openMap());
+    predictor.setAuthoritative(auth, [], authTick); // no acked shots yet
+    predictor.predict(unacked, LOCAL_PLAYER_ID);
+
+    expect(predictor.predictedProjectiles.length).toBe(ref.projectiles.length);
+    for (let i = 0; i < ref.projectiles.length; i++) {
+      expectSamePose(predictor.predictedProjectiles[i], ref.projectiles[i]);
+      expect(predictor.predictedProjectiles[i].owner).toBe(LOCAL_PLAYER_ID);
+      // Replay-spawned shots are tagged and given a stable negative view id.
+      expect(predictor.predictedProjectiles[i].spawnSeq).toBeGreaterThan(0);
+      expect(predictor.predictedProjectiles[i].id).toBeLessThan(0);
+    }
+  });
+
+  it("advances a seeded (acked) projectile exactly like the server over un-acked idle ticks", () => {
+    const ref = new World(openMap(), 1);
+    ref.step(ctx(cmd({ fire: true }))); // one bullet
+    expect(ref.projectiles.length).toBe(1);
+    const auth = structuredClone(ref.localPlayer);
+    const authTick = ref.tick;
+    const authProjectiles = structuredClone(
+      ref.projectiles.filter((p) => p.owner === LOCAL_PLAYER_ID),
+    );
+
+    // Continue the server with idle ticks — the bullet flies on its own.
+    const unacked: SequencedInput[] = [];
+    for (let t = 0; t < 8; t++) {
+      ref.step(ctx(IDLE));
+      unacked.push(seqInput(ref.tick, IDLE));
+    }
+
+    const predictor = new Predictor(openMap());
+    predictor.setAuthoritative(auth, authProjectiles, authTick);
+    predictor.predict(unacked, LOCAL_PLAYER_ID);
+
+    expect(predictor.predictedProjectiles.length).toBe(1);
+    expectSamePose(predictor.predictedProjectiles[0], ref.projectiles[0]);
+    // Idle replay never re-spawns it: it keeps its positive server id, no tag.
+    expect(predictor.predictedProjectiles[0].id).toBe(authProjectiles[0].id);
+    expect(predictor.predictedProjectiles[0].id).toBeGreaterThanOrEqual(0);
+    expect(predictor.predictedProjectiles[0].spawnSeq).toBeUndefined();
+  });
+
+  it("does not double-spawn a shot whose fire input is already acked (seeded, not replayed)", () => {
+    const ref = new World(openMap(), 1);
+    ref.step(ctx(cmd({ fire: true }))); // bullet from the now-acked fire
+    const auth = structuredClone(ref.localPlayer);
+    const authTick = ref.tick;
+    const authProjectiles = structuredClone(ref.projectiles);
+
+    const predictor = new Predictor(openMap());
+    predictor.setAuthoritative(auth, authProjectiles, authTick);
+    // The fire's seq is acked, so it's NOT in the un-acked buffer.
+    predictor.predict([], LOCAL_PLAYER_ID);
+
+    expect(predictor.predictedProjectiles.length).toBe(1); // not 2
+    expect(predictor.predictedProjectiles[0].id).toBe(authProjectiles[0].id);
+  });
+
+  it("gives an un-acked shot a stable id across repeated rebuilds", () => {
+    const ref = new World(openMap(), 1);
+    for (let t = 0; t < 5; t++) ref.step(ctx(IDLE));
+    const auth = structuredClone(ref.localPlayer);
+
+    const fireSeq = ref.tick + 1;
+    const unacked = [seqInput(fireSeq, cmd({ fire: true }))];
+
+    const predictor = new Predictor(openMap());
+    predictor.setAuthoritative(auth, [], ref.tick);
+
+    predictor.predict(unacked, LOCAL_PLAYER_ID);
+    expect(predictor.predictedProjectiles.length).toBe(1);
+    const id1 = predictor.predictedProjectiles[0].id;
+    expect(predictor.predictedProjectiles[0].spawnSeq).toBe(fireSeq);
+
+    predictor.predict(unacked, LOCAL_PLAYER_ID); // rebuild
+    const id2 = predictor.predictedProjectiles[0].id;
+
+    expect(id1).toBeLessThan(0);
+    expect(id2).toBe(id1); // stable across frames
   });
 });

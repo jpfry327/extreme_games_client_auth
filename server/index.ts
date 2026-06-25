@@ -132,14 +132,19 @@ setInterval(() => {
   const dt = (now - last) / 1000;
   last = now;
 
-  // Clear events from the previous step before ticking.
-  world.events.length = 0;
-
   loop.advance(dt, buildCtx);
 
   ticksSinceBroadcast++;
   if (ticksSinceBroadcast >= BROADCAST_EVERY) {
+    // Drain events on *broadcast*, not on *tick*. The sim runs at 100Hz but we
+    // only broadcast at 20Hz; clearing every tick (the old bug) wiped events
+    // produced on the 4 in-between ticks before any snapshot could carry them,
+    // so kills/explosions/hits on those ticks never reached the client. Letting
+    // world.events accumulate across the whole broadcast window and clearing it
+    // immediately after serializing (serializeSnapshotFor deep-clones it per
+    // client) makes world.events the buffer that drains on broadcast.
     broadcast();
+    world.events.length = 0;
     ticksSinceBroadcast = 0;
   }
 }, Math.round(TICK_DT * 1000));

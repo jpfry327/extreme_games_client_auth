@@ -116,7 +116,10 @@ async function main() {
       // no real motion is mixed in. The smoother absorbs the gap and decays it.
       const before = predictor.predict(inputMgr.unacked, view.localPlayerId);
       inputMgr.ack(snap.lastProcessedInputSeq, now);
-      predictor.setAuthoritative(local, snap.tick);
+      // M2.6: seed the predictor with our own already-acked projectiles too, so
+      // its replay advances them to the leading edge alongside the ship.
+      const localProjectiles = snap.projectiles.filter((p) => p.owner === view.localPlayerId);
+      predictor.setAuthoritative(local, localProjectiles, snap.tick);
       const after = predictor.predict(inputMgr.unacked, view.localPlayerId);
       if (before && after) smoother.absorb(before.kinematics, after.kinematics);
     } else {
@@ -181,6 +184,10 @@ async function main() {
       // M2.5: ease in any pending reconciliation correction rather than snapping.
       smoother.apply(predLocal.kinematics, dt);
       view.players.set(view.localPlayerId, predLocal);
+      // M2.6: our own shots come from the predictor (leading edge) instead of the
+      // interpolated snapshot stream (the interpolator skipped them). Appended so
+      // they fire instantly and hand off seamlessly to their server twin on ack.
+      for (const p of predictor.predictedProjectiles) view.projectiles.push(p);
     }
 
     renderer.draw(view, 1, dt);
@@ -236,6 +243,7 @@ async function main() {
       `input buf (server) ${serverInputDepth}\n` +
       `un-acked (client) ${inputMgr.pendingCount}\n` +
       `pred err ${predictor.predictionErrorPx.toFixed(1)}px\n` +
+      `pred proj ${predictor.predictedProjectiles.length}\n` +
       `smooth off ${smoother.offsetPx.toFixed(1)}px\n` +
       simLine;
 

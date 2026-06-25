@@ -20,14 +20,35 @@
  * produced this frame are already in the buffer, so the ship responds instantly
  * *and* self-corrects on each snapshot through one code path.
  *
- * Scope is the local **ship only**: the predicted world has no remote players or
- * enemy projectiles, so collision/damage never fire — hits stay 100%
- * server-authoritative. Own-weapon prediction is M2.6; correction smoothing is
- * M2.5 (here a real mismatch may visibly snap, which is acceptable).
+ * Scope of the predicted world is the local player plus **its own projectiles**:
+ * still no remote players or enemy projectiles, so collision/damage never fire —
+ * hits stay 100% server-authoritative. (M2.4 was the ship only; M2.6 adds
+ * own-weapon prediction below.) Correction smoothing is M2.5 (here a real
+ * mismatch may visibly snap, which is acceptable).
+ *
+ * Own-weapon prediction (M2.6)
+ * ----------------------------
+ * Replaying an un-acked `fire`/`bomb` input through the same pipeline *already*
+ * spawns and advances a projectile (cooldown + energy gating included), so the
+ * machinery is reused wholesale. Each rebuild the predicted world is seeded with
+ * the latest snapshot's already-acked local projectiles and then replays the
+ * un-acked inputs, which both **advances** the seeded shots to the leading edge
+ * (projectile motion is input-independent, so this matches where the server will
+ * have them) and **spawns** the still-un-acked shots. The ack boundary means a
+ * given fire is either seeded (acked) or replay-spawned (un-acked), never both,
+ * so there's no double-spawn; a server-rejected shot simply stops being replayed
+ * once its seq acks, so it retracts on its own. Collision/bomb-blast both skip
+ * the owner, and the only ship here is the owner, so the damage path stays inert.
+ *
+ * Predicted (un-acked) shots get a **negative** view id derived from their
+ * spawning input `seq` so the id is stable across the per-frame rebuild and can
+ * never collide with the positive server ids of seeded/remote projectiles. At the
+ * ack handoff a shot's id flips negative→positive at the *same* position
+ * (determinism), so it's seamless.
  */
 
 import type { GameMap } from "../sim/gamemap";
-import type { Player, PlayerId } from "../sim/types";
+import type { Player, PlayerId, Projectile } from "../sim/types";
 import { World } from "../sim/world";
 import type { SequencedInput } from "./protocol";
 
@@ -36,6 +57,14 @@ import type { SequencedInput } from "./protocol";
 interface PredictedPose {
   x: number;
   y: number;
+}
+
+/** Stable, collision-proof view id for a predicted (un-acked) projectile. Keyed
+ *  by the spawning input `seq` and the kind (a fire+bomb on the same tick share a
+ *  seq), mapped into the negative range so it never clashes with the positive
+ *  server ids carried by seeded/remote projectiles. */
+function predictedProjectileId(spawnSeq: number, kind: Projectile["kind"]): number {
+  return -(spawnSeq * 2 + (kind === "bomb" ? 1 : 0)) - 1;
 }
 
 export class Predictor {
@@ -48,6 +77,15 @@ export class Predictor {
    *  until the first snapshot arrives. */
   private authoritative: Player | null = null;
   private authoritativeTick = 0;
+  /** The latest snapshot's already-acked **local-owned** projectiles (deep-cloned),
+   *  used to seed the predicted world each rebuild before replaying un-acked
+   *  inputs. M2.6. */
+  private authoritativeProjectiles: Projectile[] = [];
+
+  /** The local player's predicted projectiles after the last `predict()` — the
+   *  seeded (acked) shots advanced to the leading edge plus the replay-spawned
+   *  (un-acked) ones. main.ts injects these into the render view. M2.6. */
+  predictedProjectiles: Projectile[] = [];
 
   /** `seq → predicted pose`, recorded during replay so `measureError` can compare
    *  against the authoritative pose for the acked `seq`. Pruned as inputs ack. */
@@ -65,9 +103,11 @@ export class Predictor {
   }
 
   /** Record the acked authoritative local state as the new rewind point. Called
-   *  from the snapshot handler with the local player out of the fresh snapshot. */
-  setAuthoritative(localPlayer: Player, tick: number): void {
+   *  from the snapshot handler with the local player and the local-owned
+   *  projectiles out of the fresh snapshot (M2.6 adds the projectiles). */
+  setAuthoritative(localPlayer: Player, localProjectiles: readonly Projectile[], tick: number): void {
     this.authoritative = structuredClone(localPlayer);
+    this.authoritativeProjectiles = structuredClone(localProjectiles as Projectile[]);
     this.authoritativeTick = tick;
   }
 
@@ -78,23 +118,43 @@ export class Predictor {
    * snapshot has set authoritative state.
    */
   predict(unacked: readonly SequencedInput[], localId: PlayerId): Player | null {
-    if (!this.authoritative) return null;
+    if (!this.authoritative) {
+      this.predictedProjectiles = [];
+      return null;
+    }
 
     // Reset to the authoritative rewind point. structuredClone so step()'s
-    // in-place mutation never corrupts the stored snapshot.
+    // in-place mutation never corrupts the stored snapshot. Seed the already-acked
+    // local projectiles (M2.6) so the replay advances them to the leading edge.
     this.world.players.clear();
     this.world.players.set(localId, structuredClone(this.authoritative));
     this.world.tick = this.authoritativeTick;
-    this.world.projectiles.length = 0;
+    this.world.projectiles = structuredClone(this.authoritativeProjectiles);
     this.world.events.length = 0;
+    // Spawn ids handed out during replay are transient — we overwrite each new
+    // projectile's id with a stable negative one below — so the counter's value
+    // doesn't matter; reset it only to keep it from growing without bound.
+    this.world.nextProjectileId = 0;
 
     this.predictedPose.clear();
     for (const input of unacked) {
+      // Track existing projectiles by identity so we can spot the ones this input
+      // spawns (firingSystem pushes new objects; the filter in damageSystem keeps
+      // survivors by reference, so survivors stay in the set).
+      const before = new Set(this.world.projectiles);
       this.world.step({ inputs: new Map([[localId, input.cmd]]) });
+      for (const p of this.world.projectiles) {
+        if (before.has(p)) continue; // already existed — seeded or earlier spawn
+        // A fresh shot from this input: tag it with the producing seq and give it
+        // a stable negative view id so it's identifiable across rebuilds.
+        p.spawnSeq = input.seq;
+        p.id = predictedProjectileId(input.seq, p.kind);
+      }
       const k = this.world.players.get(localId)!.kinematics;
       this.predictedPose.set(input.seq, { x: k.x, y: k.y });
     }
 
+    this.predictedProjectiles = this.world.projectiles;
     return this.world.players.get(localId) ?? null;
   }
 
