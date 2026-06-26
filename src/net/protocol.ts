@@ -49,6 +49,12 @@ export interface SequencedInput {
 export interface InputMsg {
   type: "input";
   input: SequencedInput;
+  /** M2.13 — the newest snapshot tick the client has decoded, piggybacked on the
+   *  input stream (client → server). The server delta-encodes the next snapshot
+   *  against this acked baseline. Cumulative/monotonic: a lost input just delays
+   *  the ack by one, the server keeps using the last tick it heard. Absent until
+   *  the first snapshot is decoded. */
+  ackSnapshotTick?: number;
 }
 
 export type ClientMsg = HelloMsg | InputMsg;
@@ -62,8 +68,12 @@ export interface WelcomeMsg {
   playerId: PlayerId;
 }
 
-/** Full-state snapshot pushed at ~33Hz. The client applies it directly to the
- *  client world; prediction and interpolation are added in M2.4 / M2.2. */
+/** Snapshot pushed at ~33Hz. **M2.13: the wire form is now a binary frame**, not
+ *  this JSON envelope — snapshots are sent as WebSocket *binary* messages encoded
+ *  by `snapshotCodec.ts` (delta-compressed against the client's acked baseline),
+ *  while the control messages here stay JSON *text* frames. The transport tells
+ *  them apart by frame type (string vs ArrayBuffer). This interface is retained
+ *  for the in-process loopback path, which still passes a plain `Snapshot`. */
 export interface SnapshotMsg {
   type: "snapshot";
   snap: Snapshot;

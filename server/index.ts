@@ -23,7 +23,9 @@ import { WebSocketServer, WebSocket } from "ws";
 import { WARBIRD, TICK_DT } from "../src/config";
 import { World } from "../src/sim/world";
 import { FixedLoop } from "../src/sim/loop";
-import { serializeSnapshotFor } from "../src/net/snapshot";
+import type { Snapshot } from "../src/net/snapshot";
+import { quantizeSnapshot } from "../src/net/snapshotCodec";
+import { SnapshotChannel } from "../src/net/serverSnapshots";
 import { ServerInputBuffer } from "../src/net/serverInput";
 import { BOT_ID, BOT_NAME, computeBotInput } from "../src/sim/bot";
 import type { InputCommand, PlayerId, StepContext } from "../src/sim/types";
@@ -68,6 +70,11 @@ world.addPlayer(BOT_ID, BOT_NAME, 1, WARBIRD);
 // the step provider below; acked back to each client in its snapshot.
 const inputs = new ServerInputBuffer();
 
+// Binary snapshot delta channel (M2.13). Holds each client's acked baseline and
+// a shared ring of recent quantized snapshots; turns the authoritative world into
+// a per-client delta-compressed binary frame (keyframe when no baseline is usable).
+const snapshots = new SnapshotChannel();
+
 // ---------- client registry ---------------------------------------------------
 
 interface Session {
@@ -98,19 +105,39 @@ function send(ws: WebSocket, msg: ServerMsg): void {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
 }
 
+/** Build the per-broadcast snapshot once from the *live* world — no per-client
+ *  `structuredClone` (M2.13). It references the world's own player/projectile
+ *  objects; it's consumed synchronously (quantized + encoded) before the next
+ *  tick mutates them. The per-client input-ack fields are filled in per client by
+ *  the channel, so they're left at 0 here. */
+function buildSharedSnapshot(pings: Record<PlayerId, number>): Snapshot {
+  return {
+    tick: world.tick,
+    players: [...world.players.values()],
+    projectiles: world.projectiles,
+    events: world.events,
+    lastProcessedInputSeq: 0,
+    inputBufferDepth: 0,
+    pings,
+  };
+}
+
 function broadcast(): void {
   const pings = pingMap();
+  // One quantize per broadcast (fresh, f32-rounded objects), shared by every
+  // client as both the encode source and the next baseline — this is the CPU win
+  // over the old O(players × clients) clone.
+  const quantized = quantizeSnapshot(buildSharedSnapshot(pings));
+  snapshots.record(quantized);
   for (const s of sessions) {
-    const snap = serializeSnapshotFor(
-      world,
+    if (s.ws.readyState !== WebSocket.OPEN) continue;
+    const bytes = snapshots.encodeFor(
       s.playerId,
-      {
-        lastProcessedInputSeq: inputs.ack(s.playerId),
-        inputBufferDepth: inputs.depth(s.playerId),
-      },
-      pings,
+      quantized,
+      inputs.ack(s.playerId),
+      inputs.depth(s.playerId),
     );
-    send(s.ws, { type: "snapshot", snap });
+    s.ws.send(bytes);
   }
 }
 
@@ -179,6 +206,11 @@ wss.on("connection", (ws) => {
       console.info(`[+] ${msg.name} → ${playerId}  (${sessions.length} connected)`);
     } else if (msg.type === "input" && session) {
       inputs.push(session.playerId, msg.input);
+      // M2.13: the client piggybacks the newest snapshot tick it has decoded;
+      // record it as that client's delta baseline for the next broadcast.
+      if (msg.ackSnapshotTick !== undefined) {
+        snapshots.onAck(session.playerId, msg.ackSnapshotTick);
+      }
     }
   });
 
@@ -195,6 +227,7 @@ wss.on("connection", (ws) => {
     if (!session) return;
     world.players.delete(session.playerId);
     inputs.remove(session.playerId);
+    snapshots.remove(session.playerId);
     const i = sessions.indexOf(session);
     if (i !== -1) sessions.splice(i, 1);
     console.info(`[-] ${session.name} (${session.playerId}) left  (${sessions.length} connected)`);
@@ -249,8 +282,9 @@ setInterval(() => {
     // produced on the 4 in-between ticks before any snapshot could carry them,
     // so kills/explosions/hits on those ticks never reached the client. Letting
     // world.events accumulate across the whole broadcast window and clearing it
-    // immediately after serializing (serializeSnapshotFor deep-clones it per
-    // client) makes world.events the buffer that drains on broadcast.
+    // immediately after the broadcast (which quantizes + encodes a fresh copy of
+    // them per the M2.13 codec) makes world.events the buffer that drains on
+    // broadcast.
     broadcast();
     world.events.length = 0;
     ticksSinceBroadcast = 0;

@@ -257,27 +257,57 @@ the self-inflicted ~260ms backlog is gone (`ping ≈ ack`), offense *feels* inst
 
 ---
 
-### M2.13 — Binary snapshots + delta compression
+### M2.13 — Binary snapshots + delta compression  ✓
 
 **Goal:** stop sending full-state JSON every broadcast. Cut per-client CPU
 (`structuredClone` + `JSON.stringify` is O(players²)) and bandwidth so the server
 scales past a handful of players.
 
 **Scope:**
-- [ ] Binary snapshot writer/reader (pack floats/ints; no JSON) behind the existing
-      `serializeSnapshotFor` / `applySnapshot` seam.
-- [ ] **Delta encoding:** each client acks the last snapshot it applied; the server
-      sends only the entities/fields changed since that baseline, with a periodic
-      keyframe. Reuse the M2.3 ack plumbing.
-- [ ] Drop the per-client `structuredClone`; serialize directly from the
-      authoritative world into a per-client buffer.
-- [ ] Tests: a delta-applied client world equals a full-snapshot client world
-      bit-for-bit; keyframe recovery after a dropped baseline.
+- [x] Binary snapshot writer/reader (`net/byteBuffer.ts` + `net/snapshotCodec.ts`):
+      a schema-driven, **field-level** codec packing floats as f32 and ints as
+      LEB128 varints — no JSON. Snapshots ride the WebSocket as *binary* frames;
+      control messages (hello/welcome/reject/input) stay JSON *text* frames, and
+      the transport tells them apart by frame type. The loopback `GameServer` path
+      keeps the plain `Snapshot` object (binary is purely the wire form).
+- [x] **Delta encoding:** the acked-baseline (Quake3) model. Each client
+      piggybacks the newest snapshot tick it decoded on its input stream
+      (`InputMsg.ackSnapshotTick`, reusing the M2.3 input channel); the server
+      delta-encodes the next snapshot against *that* baseline (a per-entity dirty
+      bitmask + only the changed fields), stamping the `baselineTick` so the client
+      applies the delta onto the right retained snapshot. A keyframe is sent when no
+      usable baseline exists (fresh join, lost ack, aged-out) or on a periodic
+      interval (~60 broadcasts). `net/serverSnapshots.ts` (`SnapshotChannel`) owns
+      the per-client baseline bookkeeping. Loss-robust: the client only ever acks
+      what it holds, so the server only ever diffs against something decodable.
+- [x] Dropped the per-client `structuredClone`: the server builds **one** shared
+      snapshot from the live world per broadcast and quantizes it **once** (the
+      next baseline), then encodes per client — replacing the old O(players ×
+      clients) clone.
+- [x] Tests (`net/snapshotCodec.test.ts`): a delta-applied client world equals a
+      full-snapshot one bit-for-bit across a stepped sequence; keyframe recovery
+      after a dropped baseline; entity add/remove; all four event types + pings;
+      server-side baseline selection (keyframe-until-ack-then-delta). Verified
+      end-to-end against the live headless server over a real socket (keyframe →
+      deltas → periodic keyframe).
 
-**Out of scope:** AOI culling (M2.14) — though delta + AOI compose cleanly.
+**Bit-for-bit parity note:** floats are quantized to f32, so the codec is
+*symmetric* — the server stores `quantizeSnapshot(sent)` as the next baseline,
+exactly what the client reconstructs by decoding, so "unchanged" on the server is
+"keep the baseline value" on the client and they're equal. (Gotcha found in
+build: a varint field can be `Infinity` — bullets bounce until lifetime ends, so
+`Projectile.bounces` is `Infinity` — which loops `writeVaruint` forever; handled
+by a dedicated `varinf` field kind, and `writeVaruint` now throws on non-finite
+input rather than hanging.)
 
-**Playable end state:** identical feel, a fraction of the bytes and server CPU;
-bandwidth now scales with *change*, not roster size.
+**Out of scope:** AOI culling (M2.14) — though delta + AOI compose cleanly. The
+shared baseline ring becomes per-client once AOI makes per-client content differ;
+the encode/baseline machinery is unchanged.
+
+**Playable end state:** identical feel, a fraction of the bytes and server CPU
+(a steady 2-player scene's delta is <½ its keyframe; a cruising ship sends a
+handful of floats, not ~45 fields); bandwidth now scales with *change*, not roster
+size.
 
 ---
 

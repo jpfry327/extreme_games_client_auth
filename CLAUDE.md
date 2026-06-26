@@ -60,10 +60,11 @@ Steps 7–8 (damage / death / respawn) are the keystone for all competitive feat
 
 ### Networking shape (`src/net/`)
 
-Three wire message types (JSON for now):
-1. **`InputCommand`** (client → server) — player intent; never state.
-2. **`Snapshot`** (server → client) — serialized Layer A state. Because Layer A is plain data, the snapshot essentially *is* the world.
-3. **`GameEvent[]`** (server → client) — Layer C, for effects/audio/kill-feed.
+Three wire message types. Control/input is JSON text; snapshots are a **binary,
+delta-compressed** frame as of M2.13 (see Current milestone status):
+1. **`InputCommand`** (client → server) — player intent; never state. JSON.
+2. **`Snapshot`** (server → client) — serialized Layer A state. Because Layer A is plain data, the snapshot essentially *is* the world. Sent as a binary delta against the client's acked baseline (`net/snapshotCodec.ts`); the loopback path still passes the plain object.
+3. **`GameEvent[]`** (server → client) — Layer C, for effects/audio/kill-feed (carried in the snapshot frame).
 
 `Transport` is an interface (`src/net/transport.ts`); `LoopbackTransport` and `WebSocketTransport` are interchangeable implementations. Swapping them is a one-line change in `main.ts`.
 
@@ -78,10 +79,10 @@ Snapshots are **per-client** (`serializeSnapshotFor(world, playerId)`), which is
 ## Current milestone status
 
 Per `docs/roadmap.md`, the full standard netcode model (M2.0–M2.10) is complete, and
-the M2.11 responsiveness/efficiency pass is underway. The sequence is:
+the M2.11+ responsiveness/efficiency pass is underway. The sequence is:
 ```
 M0 ✓ → M1 ✓ → M2.0–M2.10 ✓ (full netcode model)
-     → M2.11 ✓ (measure & tune) → M2.12 UDP transport → M2.13 binary+delta
+     → M2.11 ✓ (measure & tune) → M2.12 ✗ (UDP transport — SKIPPED) → M2.13 ✓ binary+delta
      → M2.14 AOI/stealth → M2.15 input batching → M3 (UI) → ...
 ```
 
@@ -119,6 +120,31 @@ delay (`interpDelayMs` + RTT ≈ 175ms) is covered rather than clamped (the "bom
 register" bug); **made the interpolation delay adaptive** (`net/adaptiveInterp.ts`, driven by
 `net/netHealth.ts`) so a jittery link stops starving the buffer; and reconciled the
 broadcast-rate doc drift (~33Hz, not 20Hz).
+
+M2.13 replaces the JSON snapshot on the WebSocket data plane with a **binary, field-level
+delta** codec (M2.12 UDP was skipped). The seam is unchanged: the server still builds a plain
+`Snapshot` (Layer A); `net/snapshotCodec.ts` encodes it to bytes and the client decodes it back
+to the identical shape, so the interpolator/predictor/renderer are untouched. The loopback
+`GameServer` still passes the plain object — binary is purely the wire form. Pieces:
+- **`net/byteBuffer.ts`** — `ByteWriter`/`ByteReader` primitives (LEB128 varint, f32, bool,
+  string). `writeVaruint` throws on a non-finite value (a bullet's `bounces` is `Infinity`,
+  which would otherwise loop forever); the `bounces` field uses a dedicated `varinf` kind that
+  round-trips `Infinity`.
+- **`net/snapshotCodec.ts`** — a schema-driven codec. Each `Player`/`Projectile` is an ordered
+  field list indexing a per-entity dirty bitmask; a delta writes only changed fields, a keyframe
+  writes all. Floats are quantized to f32, and the codec is *symmetric* (`quantizeSnapshot` =
+  what the client decodes), so a delta-applied world equals a full-snapshot one bit-for-bit.
+  Only players/projectiles are delta'd; tick/ack/events/pings ride in full (tiny).
+- **Acked-baseline (Quake3) model** — the client piggybacks the newest tick it decoded on its
+  input stream (`InputMsg.ackSnapshotTick`); the server (`net/serverSnapshots.ts`
+  `SnapshotChannel`) delta-encodes the next snapshot against that baseline, or sends a keyframe
+  when none is usable (fresh join / lost ack / aged-out / a ~60-broadcast periodic interval).
+  Loss-robust: the client only acks what it holds, so the server only diffs against something
+  decodable. Snapshots are WebSocket **binary** frames; control messages stay JSON **text**
+  frames; the transport tells them apart by frame type.
+- **Server CPU** — the old per-client `structuredClone` is gone: one shared snapshot is built
+  from the live world and quantized **once** per broadcast (the next baseline), then encoded per
+  client (O(players × clients) clone → one O(players) quantize).
 
 ## Key constraints
 
