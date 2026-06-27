@@ -11,6 +11,7 @@ import { SimulatedTransport } from "./net/networkSimulator";
 import { SnapshotInterpolator, pickStraddlingPair } from "./net/interpolation";
 import { RemoteProjectileSimulator } from "./net/remoteProjectiles";
 import { LocalSim } from "./net/localSim";
+import { CosmeticHitDetector } from "./net/cosmeticHits";
 import { ReportSender } from "./net/reportSender";
 import type { DeathReportMsg, StateReportMsg } from "./net/protocol";
 import { NetHealth } from "./net/netHealth";
@@ -41,6 +42,11 @@ async function main() {
   // latest snapshot (so they bounce off walls in real time) and rendered at the
   // same render time as remote ships (now − interpDelay).
   const remoteProjectiles = new RemoteProjectileSimulator(map);
+  // Visual-only hit feedback: in the defender-authority model our own shots are
+  // never tested against enemies on our screen, so they sail *through* them until
+  // the relayed reaction returns. This detects an own shot overlapping an enemy as
+  // drawn and lets us show the spark/blast immediately (never touches damage).
+  const cosmeticHits = new CosmeticHitDetector();
 
   // --- Client-authoritative relay model ---
   // LocalSim is our ship's authoritative self-sim (created on `welcome`). We free-
@@ -274,16 +280,46 @@ async function main() {
     }
     view.players.set(localId, me);
 
-    // Drop the server's relayed duplicate of our *own* death — we draw it from our
-    // local event instead, so it isn't shown twice.
+    // Drop the server's relayed duplicates of our *own* effects — we draw them
+    // locally instead, so they aren't shown twice (~1 RTT late):
+    //   • our death (from our local shipDied event),
+    //   • our bomb detonations (a local wall/expiry blast, or a cosmetic blast on
+    //     an enemy below), and
+    //   • our hit sparks (the cosmetic spark below).
     if (view.events.length > 0) {
-      view.events = view.events.filter((e) => !(e.type === "shipDied" && e.victim === localId));
+      view.events = view.events.filter(
+        (e) =>
+          !(e.type === "shipDied" && e.victim === localId) &&
+          !(e.type === "bombExploded" && e.owner === localId) &&
+          !(e.type === "shipHit" && e.by === localId),
+      );
     }
     for (const e of localEvents) view.events.push(e);
 
     // (e) Projectiles: our own shots from LocalSim (present), everyone else's from
     //     the deterministic remote simulator (rendered at the ships' render time).
-    for (const p of localSim.ownProjectiles()) view.projectiles.push(p);
+    //
+    //     Visual-only hit feedback (defender-authority model): our own shots are
+    //     never adjudicated against enemies on our screen, so they'd sail *through*
+    //     them. Detect an own shot overlapping an enemy *as drawn* and: show the
+    //     spark (bullet) / blast (bomb) immediately, stop drawing that shot, and
+    //     drop our local copy. The defender still owns the real hit — this is
+    //     purely cosmetic (and may, like Subspace, occasionally mark a miss).
+    const ownShots = localSim.ownProjectiles();
+    const enemies = [...view.players.values()].filter((p) => p.id !== localId);
+    for (const h of cosmeticHits.detect(ownShots, enemies)) {
+      if (h.kind === "bomb") {
+        view.events.push({ type: "bombExploded", x: h.x, y: h.y, owner: localId });
+      } else {
+        view.events.push({ type: "shipHit", target: h.target, by: localId, damage: 0, x: h.x, y: h.y, fatal: false });
+      }
+    }
+    for (const p of ownShots) {
+      if (!cosmeticHits.isHit(p.id)) view.projectiles.push(p);
+    }
+    // Drop the spent copies so a bullet doesn't fly on and a missed bomb doesn't
+    // stray-detonate on a far wall (the defender's injected copy is unaffected).
+    localSim.dropOwnProjectiles((id) => cosmeticHits.isHit(id));
     const remoteShots = remoteProjectiles.simulate(
       interp.snapshots,
       now,

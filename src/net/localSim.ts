@@ -125,6 +125,18 @@ export class LocalSim {
     return this.world.projectiles.filter((p) => this.defended.has(p.owner));
   }
 
+  /** Drop own projectiles the client has cosmetically "spent" on an enemy hit
+   *  (visual-only relay feedback — see `cosmeticHits.ts`). Only own (defended)
+   *  shots are eligible; incoming injected shots are never touched. Safe because
+   *  the defender already holds its own injected copy and adjudicates the real
+   *  hit, so removing our local copy only stops the shot flying on / a missed bomb
+   *  stray-detonating on a far wall — it never changes damage. */
+  dropOwnProjectiles(shouldDrop: (id: number) => boolean): void {
+    this.world.projectiles = this.world.projectiles.filter(
+      (p) => !(this.defended.has(p.owner) && shouldDrop(p.id)),
+    );
+  }
+
   private markSeen(id: number): void {
     this.seen.add(id);
     if (this.seen.size > MAX_SEEN) {
