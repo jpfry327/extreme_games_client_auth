@@ -3,17 +3,16 @@
  *
  * Pins the load-bearing behaviour: an own shot overlapping a drawn enemy fires a
  * cosmetic hit exactly once (and only after surviving a frame, so it was reported),
- * never for the firer's own ship or a dead enemy, and `LocalSim.dropOwnProjectiles`
- * removes only the spent own shots.
+ * and never for the firer's own ship or a dead enemy. Marking a hit is *visual only*
+ * — it never removes the shot from the sim, so it stays in the firer's report and
+ * the defender keeps adjudicating it (the "no damage" bug was dropping it here).
  */
 
 import { describe, expect, it } from "vitest";
 import { WARBIRD, shipConfig } from "../config";
-import { GameMap } from "../sim/gamemap";
 import { createPlayer } from "../sim/player";
 import type { Player, PlayerId, Projectile } from "../sim/types";
 import { CosmeticHitDetector } from "./cosmeticHits";
-import { LocalSim } from "./localSim";
 
 function enemyAt(id: PlayerId, x: number, y: number): Player {
   return createPlayer(id, id, 1, WARBIRD, x, y);
@@ -57,20 +56,17 @@ describe("CosmeticHitDetector", () => {
     expect(det.detect([far, onTopButDead], [enemy])).toHaveLength(0);
   });
 
-  it("dropOwnProjectiles removes only the spent own shots, never injected ones", () => {
-    const sim = new LocalSim(new GameMap(64, 64, new Uint8Array(64 * 64)), ["me"]);
-    sim.addOwned("me", "Me", 0, WARBIRD, 100, 100);
-    // One own shot we'll "spend", one own shot we keep, plus an injected enemy shot.
-    sim.world.projectiles.push(ownShot("me", 1, 100, 100));
-    sim.world.projectiles.push(ownShot("me", 2, 200, 200));
-    sim.injectIncoming([ownShot("enemy", 3, 150, 150)]);
-    sim.step(new Map()); // flush the injected shot into the world
+  it("a cosmetic hit is visual only — the shot is still live (so it stays reported)", () => {
+    const det = new CosmeticHitDetector();
+    const enemy = enemyAt("enemy", 500, 500);
+    const shot = ownShot("me", 1, 500, 500);
 
-    sim.dropOwnProjectiles((id) => id === 1);
+    det.detect([shot], [enemy]); // first frame primes prevSeen
+    expect(det.detect([shot], [enemy])).toHaveLength(1); // fires the cosmetic hit
+    expect(det.isHit(1)).toBe(true);
 
-    const ids = sim.world.projectiles.map((p) => p.id).sort();
-    expect(ids).toContain(2); // kept own shot
-    expect(ids).toContain(3); // injected enemy shot — untouched
-    expect(ids).not.toContain(1); // spent own shot — dropped
+    // The detector never mutates the projectile or removes it: the caller keeps it
+    // flying + reported so the defender adjudicates the real hit.
+    expect(shot.alive).toBe(true);
   });
 });

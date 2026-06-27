@@ -13,11 +13,16 @@
  * an enemy **as drawn** — your shot at the present leading edge vs the enemy
  * interpolated in the past, the two sprites the player actually sees — so the
  * caller can, immediately and entirely cosmetically:
- *   1. draw the burst/spark right there,
- *   2. stop drawing the projectile (it ends *at* the enemy, not through it), and
- *   3. drop the local copy from the owner's `LocalSim` (the defender holds its own
- *      injected copy and adjudicates the real hit, so dropping ours only stops the
- *      shot flying on / a missed bomb stray-detonating on a far wall).
+ *   1. draw the burst/spark right there, and
+ *   2. stop drawing the projectile (it ends *at* the enemy, not through it).
+ *
+ * Crucially it does **not** drop the shot from the owner's `LocalSim`: the shot
+ * must keep flying so it stays in the owner's state report for its whole life. The
+ * defender's `reconcileIncoming` retracts an injected shot the moment it leaves the
+ * report, so dropping ours here would yank the defender's copy a tick before it
+ * landed — the "my bullets/bombs do no damage" bug. The only cost of letting a
+ * spent bomb fly on is the stray far-wall blast it would draw on *our* screen, which
+ * `main.ts` suppresses via the bomb's id (it already drew the cosmetic blast).
  *
  * It is **cosmetic only** — it never touches energy, damage, kills, or death. The
  * accepted trade (the same one Subspace makes) is the occasional false positive: a
@@ -26,9 +31,8 @@
  *
  * A projectile must have been seen in a *prior* `detect()` call before it can fire
  * (`pendingFire` → `hit`): that one-frame age guarantees the owner has already
- * reported the shot at least once, so dropping our local copy can never rob the
- * defender of a shot it had not yet received (the point-blank fire-and-overlap-in-
- * one-frame edge).
+ * reported the shot at least once, so the cosmetic burst never precedes the shot the
+ * defender adjudicates (the point-blank fire-and-overlap-in-one-frame edge).
  */
 
 import { shipConfig } from "../config";
@@ -46,8 +50,9 @@ export interface CosmeticHit {
 }
 
 export class CosmeticHitDetector {
-  /** Projectile ids already detonated once — drawn-skipped and dropped by the
-   *  caller, and never re-detonated. Pruned each `detect()` to ids still in flight. */
+  /** Projectile ids already detonated once — drawn-skipped by the caller (and used
+   *  to suppress a spent bomb's later far-wall blast), never re-detonated. Pruned
+   *  each `detect()` to ids still in flight. */
   private readonly hit = new Set<number>();
   /** Ids of own shots present in the previous `detect()` call, so a shot must
    *  survive ≥1 frame (and thus a report) before it may detonate (see header). */
@@ -85,7 +90,7 @@ export class CosmeticHitDetector {
   }
 
   /** Whether projectile `id` has cosmetically detonated — used to skip drawing it
-   *  and to drop it from the owner's `LocalSim`. */
+   *  and to suppress its later far-wall blast (a spent bomb). */
   isHit(id: number): boolean {
     return this.hit.has(id);
   }

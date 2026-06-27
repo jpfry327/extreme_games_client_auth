@@ -72,6 +72,14 @@ export class LocalSim {
    *  world reaches each shot's `releaseTick` (see render-time adjudication above). */
   private pendingIncoming: PendingShot[] = [];
 
+  /** Incoming-shot ids this sim has *consumed* — its injected copy died (it hit the
+   *  owned ship or a wall) on this authoritative screen. The firer never adjudicates
+   *  its own shots, so its copy of a shot that hit us keeps flying through us (a
+   *  mirror) and is still reported/drawn as a remote — this lets the client suppress
+   *  drawing that ghost so a bullet/bomb visibly *stops* where it hit, instead of
+   *  sailing through. Pruned in `reconcileIncoming` once the id leaves the report. */
+  private readonly consumedIncoming = new Set<number>();
+
   /** How long (sim ticks) to hold an injected incoming shot before it starts
    *  flying, so it's adjudicated where it's drawn (≈ the client's interp delay).
    *  0 = adjudicate at the present (the default; the server's bot sim keeps this). */
@@ -145,12 +153,27 @@ export class LocalSim {
    *  or merely left our area of interest; in the latter case it is ≥ a weapon's full
    *  reach away and can no longer hit us before expiring, so retracting it is safe
    *  and the per-owner watermark correctly never re-injects it. Defended-owner shots
-   *  (our own) are never touched — their ids live in a different namespace. */
+   *  (our own) are never touched — their ids live in a different namespace.
+   *
+   *  This stays correct only because the firer reports each shot for its *whole*
+   *  life (see `ownProjectiles`): a shot leaves the report when it truly dies, not
+   *  when the firer cosmetically "spends" it on us — otherwise every hit would be
+   *  retracted here a tick before it landed. */
   reconcileIncoming(reportedIds: ReadonlySet<number>): void {
     this.world.projectiles = this.world.projectiles.filter(
       (p) => this.defended.has(p.owner) || reportedIds.has(p.id),
     );
     this.pendingIncoming = this.pendingIncoming.filter((e) => reportedIds.has(e.proj.id));
+    // A consumed id that has left the report is no longer drawn as a remote, so it
+    // never needs suppressing again — forget it to keep the set bounded to in-flight.
+    for (const id of this.consumedIncoming) if (!reportedIds.has(id)) this.consumedIncoming.delete(id);
+  }
+
+  /** Whether incoming shot `id` was consumed on our screen (its injected copy died
+   *  here). The client uses this to stop drawing the firer's still-flying remote
+   *  copy of a shot that already hit us. */
+  isIncomingConsumed(id: number): boolean {
+    return this.consumedIncoming.has(id);
   }
 
   /** Advance one authoritative tick with the owned player's intent. Releases any
@@ -165,7 +188,20 @@ export class LocalSim {
       }
       this.pendingIncoming = stillHeld;
     }
+
+    // Record which incoming (non-owned) shots this step consumes: any in the world
+    // before the step but gone after died here (hit our ship or a wall). Their firer
+    // keeps flying + reporting its own copy, so the client suppresses drawing it.
+    const incomingBefore: number[] = [];
+    for (const p of this.world.projectiles) if (!this.defended.has(p.owner)) incomingBefore.push(p.id);
+
     this.world.step({ inputs });
+
+    if (incomingBefore.length > 0) {
+      const stillAlive = new Set<number>();
+      for (const p of this.world.projectiles) if (!this.defended.has(p.owner)) stillAlive.add(p.id);
+      for (const id of incomingBefore) if (!stillAlive.has(id)) this.consumedIncoming.add(id);
+    }
   }
 
   /** Drop incoming shots queued but not yet flown — used when the client's loop
@@ -179,20 +215,17 @@ export class LocalSim {
   }
 
   /** The owned player's own live projectiles — what a client reports to the relay
-   *  (it owns its shots) and what the server includes in snapshots for the bot. */
+   *  (it owns its shots) and what the server includes in snapshots for the bot.
+   *
+   *  This is reported for a shot's **whole life** — until it actually dies (wall /
+   *  expiry) in this authoritative sim — even after the client has cosmetically
+   *  "spent" it on an enemy (see `cosmeticHits.ts`, which only stops *drawing* it).
+   *  That honesty is load-bearing: the defender's `reconcileIncoming` retracts an
+   *  injected shot the instant it leaves the report, so a shot dropped here early
+   *  would be yanked from the defender's sim before it could adjudicate the hit —
+   *  the cause of "bullets/bombs do no damage". The firer never adjudicates its own
+   *  shots, so keeping a spent shot flying costs nothing but its lingering corpse. */
   ownProjectiles(): Projectile[] {
     return this.world.projectiles.filter((p) => this.defended.has(p.owner));
-  }
-
-  /** Drop own projectiles the client has cosmetically "spent" on an enemy hit
-   *  (visual-only relay feedback — see `cosmeticHits.ts`). Only own (defended)
-   *  shots are eligible; incoming injected shots are never touched. Safe because
-   *  the defender already holds its own injected copy and adjudicates the real
-   *  hit, so removing our local copy only stops the shot flying on / a missed bomb
-   *  stray-detonating on a far wall — it never changes damage. */
-  dropOwnProjectiles(shouldDrop: (id: number) => boolean): void {
-    this.world.projectiles = this.world.projectiles.filter(
-      (p) => !(this.defended.has(p.owner) && shouldDrop(p.id)),
-    );
   }
 }

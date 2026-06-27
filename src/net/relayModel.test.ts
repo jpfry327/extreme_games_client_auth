@@ -117,6 +117,50 @@ describe("LocalSim — defender authority", () => {
     expect(isAlive(me)).toBe(true);
   });
 
+  it("keeps adjudicating an in-flight shot that stays in the report until it lands", () => {
+    // The inverse of the ghost test: as long as the firer keeps reporting the shot
+    // (it has NOT cosmetically dropped it from its report), the defender flies it to
+    // a hit. This is the contract the "bullets/bombs do no damage" fix restored —
+    // the firer must report a spent shot for its whole life, not retract it on hit.
+    const sim = new LocalSim(openMap(), ["me"]);
+    const me = sim.addOwned("me", "Me", 0, WARBIRD, 500, 500);
+    me.resources.energy = 5; // one bullet is fatal once it reaches us
+
+    const incoming: Projectile = { ...bulletAt("enemy", 1, 440, 500), vx: 5, life: 50 };
+    sim.injectIncoming([incoming]);
+
+    // Each tick the firer re-reports the shot (id stays present) — so reconcile keeps it.
+    for (let i = 0; i < 20; i++) {
+      sim.reconcileIncoming(new Set([1]));
+      sim.step(new Map());
+      if (!isAlive(me)) break;
+    }
+
+    expect(sim.world.events.some((e) => e.type === "shipHit" && e.target === "me")).toBe(true);
+    expect(me.combat.respawnAt).toBeGreaterThan(0); // it reached us and killed us
+  });
+
+  it("marks an incoming shot consumed when its injected copy dies on us, then forgets it", () => {
+    // Lets the client stop drawing the firer's still-flying remote copy of a shot
+    // that already hit us (the firer never adjudicates its own shots) — otherwise the
+    // bullet/bomb sails visibly *through* the defender after the hit.
+    const sim = new LocalSim(openMap(), ["me"]);
+    const me = sim.addOwned("me", "Me", 0, WARBIRD, 500, 500);
+    me.resources.energy = 100000; // survive so we can observe the consumed flag
+
+    sim.injectIncoming([bulletAt("enemy", 1, 500, 500)]);
+    expect(sim.isIncomingConsumed(1)).toBe(false);
+    sim.step(new Map()); // the bullet reaches us and dies here
+    expect(sim.isIncomingConsumed(1)).toBe(true);
+
+    // Suppressed while the firer still reports its (through-flying) copy…
+    sim.reconcileIncoming(new Set([1]));
+    expect(sim.isIncomingConsumed(1)).toBe(true);
+    // …and forgotten once it leaves the report (no longer drawn anywhere).
+    sim.reconcileIncoming(new Set());
+    expect(sim.isIncomingConsumed(1)).toBe(false);
+  });
+
   it("ignores a re-reported (already-seen) incoming shot", () => {
     const sim = new LocalSim(openMap(), ["me"]);
     const me = sim.addOwned("me", "Me", 0, WARBIRD, 500, 500);
