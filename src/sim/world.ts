@@ -1,6 +1,5 @@
-import { LAGCOMP, WARBIRD, type ShipType } from "../config";
+import { WARBIRD, type ShipType } from "../config";
 import { GameMap } from "./gamemap";
-import { TickHistory } from "./history";
 import { createPlayer } from "./player";
 import { SeededRng } from "./rng";
 import { findSpawn } from "./spawn";
@@ -51,23 +50,36 @@ export class World {
    *  drains and clears this once per drawn frame (see main.ts). */
   events: GameEvent[] = [];
 
-  /** Per-tick pose history for server-side lag compensation (M2.9). Runtime-only,
-   *  like `events`/`contacts` — never serialized into a snapshot. Populated at the
-   *  end of each `step()` and read by the collision system to rewind a target to
-   *  the firer's view. Only the authoritative server meaningfully accrues this; on
-   *  the client the view world is never stepped and the predicted world holds no
-   *  remote targets, so its history is harmless and unread. */
-  history = new TickHistory(LAGCOMP.historyTicks);
-
   /** Which players currently hold the warp key (debug). Runtime-only, like
-   *  `events`/`contacts`/`history` — never serialized. Lets `warpSystem`
-   *  edge-trigger on the press instead of warping every tick of the hold. */
+   *  `events`/`contacts` — never serialized. Lets `warpSystem` edge-trigger on the
+   *  press instead of warping every tick of the hold. */
   warpHeld = new Set<PlayerId>();
 
   /** Which player this client controls / the camera follows. Server-side this
    *  has no meaning; it's a client convenience that rides along on the world.
    *  Set by main.ts after the server sends `welcome` (M2.1+). */
   localPlayerId: PlayerId = LOCAL_PLAYER_ID;
+
+  /** Ownership scope for the **client-authoritative relay model** — the set of
+   *  players this node is the *defender* for, i.e. the ones whose death/respawn
+   *  this world is allowed to decide. `null` means "all players" (the legacy
+   *  server-authoritative path and every single-world unit test). A client's
+   *  `LocalSim` sets this to `{ localPlayerId }`; the server sets it to its bot(s).
+   *  Players outside the scope are *mirrors* — present as collision targets but
+   *  never killed/respawned here; their own defender decides that. */
+  defends: Set<PlayerId> | null = null;
+
+  /** Whether this node owns the scoreboard, i.e. may credit kills (kills++,
+   *  bounty transfer, score) when a defended player it simulates dies. `true` on
+   *  the authoritative server and the legacy single-world path; `false` on a
+   *  client `LocalSim` (the server scores from the client's `DeathReport`
+   *  instead, so the client never double-credits). */
+  scoresKills = true;
+
+  /** Whether this world is the defender for `id` (and thus may kill/respawn it). */
+  defendsPlayer(id: PlayerId): boolean {
+    return this.defends === null || this.defends.has(id);
+  }
 
   /** Monotonically increasing counter for stable projectile ids. Incremented by
    *  the firing system each time a projectile is spawned, so snapshots can track
@@ -127,10 +139,5 @@ export class World {
     damageSystem(this);
     deathSystem(this);
     respawnSystem(this);
-
-    // Record this tick's end-of-step poses for lag compensation (M2.9). Written
-    // last so the next tick's collision tests can rewind to any of the last
-    // ~historyTicks. Runtime-only; not part of the snapshot.
-    this.history.record(this.tick, this.players);
   }
 }

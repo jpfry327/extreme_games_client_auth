@@ -71,7 +71,7 @@ export class RemoteProjectileSimulator {
     const { a, b, extrapMs } = pair;
 
     // Base = the newest snapshot at-or-before render time. Take its live remote
-    // projectiles (the local player's own shots come from the Predictor — M2.6).
+    // projectiles (the local player's own shots come from its LocalSim).
     const base = a.snap.projectiles.filter((p) => p.alive && p.owner !== localPlayerId);
     if (base.length === 0) return [];
 

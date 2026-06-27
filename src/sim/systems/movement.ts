@@ -29,6 +29,7 @@ const IDLE: InputCommand = {
  */
 export function movementSystem(world: World, ctx: StepContext): void {
   for (const player of world.players.values()) {
+    if (!world.defendsPlayer(player.id)) continue; // a mirror — its own node moves it
     if (!isAlive(player)) continue; // dead ships don't move or recharge
     stepPlayer(player, ctx.inputs.get(player.id) ?? IDLE, world.map);
   }

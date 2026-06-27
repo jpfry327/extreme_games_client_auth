@@ -15,16 +15,16 @@
  * by `alpha`) draws exactly the baked pose regardless of the `alpha` it's passed.
  * The renderer stays completely untouched.
  *
- * What this step deliberately does NOT do (kept isolated per the M2 sub-split):
- *   - the **local player** is pinned to the latest snapshot, not interpolated
- *     (still laggy; client prediction is M2.4).
+ * What this step deliberately does NOT do:
+ *   - the **local player** is pinned to the latest snapshot, not interpolated;
+ *     main.ts overlays the authoritative `LocalSim` pose (relay model).
  *
- * Projectiles are **not** handled here at all (M2.8): the local player's own
- * shots come from the `Predictor` (M2.6), and *every other* player's shots are
- * simulated deterministically by the `RemoteProjectileSimulator` (M2.8) instead
- * of being lerped — so a bullet that bounces off a wall between two snapshots
- * traces the real bounce path rather than teleporting through the corner. Both
- * sources are stitched into `view.projectiles` by main.ts after `buildView`.
+ * Projectiles are **not** handled here at all: the local player's own shots come
+ * from its `LocalSim` (present), and *every other* player's shots are simulated
+ * deterministically by the `RemoteProjectileSimulator` instead of being lerped —
+ * so a bullet that bounces off a wall between two snapshots traces the real bounce
+ * path rather than teleporting through the corner. Both sources are stitched into
+ * `view.projectiles` by main.ts after `buildView`.
  */
 
 import { TICK_DT } from "../config";
@@ -139,32 +139,12 @@ export class SnapshotInterpolator {
   }
 
   /**
-   * The server tick the local view corresponds to at render time `nowMs −
-   * interpDelayMs` — the rewind target for server-side lag compensation (M2.9).
-   * The firer is always looking at remote ships interpolated between the
-   * straddling snapshot pair, so the tick it's effectively aiming through is those
-   * two snapshots' ticks blended by the same `t` the poses use, rounded to a whole
-   * tick (the server's history is keyed by integer ticks). Stamped onto each
-   * outgoing input so the server can rewind targets to exactly this view.
-   *
-   * Returns `null` before any snapshot has arrived (no view yet → no
-   * compensation). During buffer starvation the pair clamps to the newest sample,
-   * so this returns the newest tick — i.e. less rewind, never more.
-   */
-  renderTick(nowMs: number, interpDelayMs: number, extrapolateMaxMs: number): number | null {
-    const renderTime = nowMs - interpDelayMs;
-    const pair = pickStraddlingPair(this.buffer, renderTime, extrapolateMaxMs);
-    if (!pair) return null;
-    const { a, b, t } = pair;
-    return Math.round(a.snap.tick + (b.snap.tick - a.snap.tick) * t);
-  }
-
-  /**
    * Populate `view` with the interpolated world for render time `nowMs −
    * interpDelayMs`. Remote *players* are lerped between the straddling snapshot
-   * pair; the local player is pinned to the newest snapshot. Projectiles are left
-   * empty here — main.ts fills them from the Predictor + RemoteProjectileSimulator
-   * (M2.8). Released events (in interpolated time) are written to `view.events`.
+   * pair; the local player is pinned to the newest snapshot (main.ts overlays the
+   * authoritative LocalSim pose). Projectiles are left empty here — main.ts fills
+   * them from LocalSim (own shots) + RemoteProjectileSimulator (remote shots).
+   * Released events (in interpolated time) are written to `view.events`.
    *
    * On buffer starvation (render time is past the newest snapshot — a lag spike
    * or a run of dropped snapshots) remote entities are dead-reckoned forward from
@@ -198,14 +178,14 @@ export class SnapshotInterpolator {
       if (bp.id === localPlayerId) continue; // local handled below, from newest
       view.players.set(bp.id, interpolatePlayer(olderPlayers.get(bp.id), bp, t, extrapTicks));
     }
-    // The local player is NOT interpolated — render it from the latest
-    // authoritative snapshot (prediction overrides it in main.ts since M2.4).
+    // The local player is NOT interpolated — pin it to the latest snapshot;
+    // main.ts then overlays the authoritative `LocalSim` pose (relay model).
     const localNewest = newest.snap.players.find((p) => p.id === localPlayerId);
     if (localNewest) view.players.set(localNewest.id, pinPlayer(localNewest));
 
     // --- projectiles ---------------------------------------------------------
     // Intentionally empty (M2.8). Projectiles are no longer interpolated here:
-    // main.ts fills `view.projectiles` from the Predictor (own shots, M2.6) and
+    // main.ts fills `view.projectiles` from LocalSim (own shots) and
     // the RemoteProjectileSimulator (everyone else's, simulated deterministically
     // so bounces don't teleport). We only clear it so the simulator/predictor
     // start from an empty list each frame.

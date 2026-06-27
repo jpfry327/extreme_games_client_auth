@@ -1,53 +1,30 @@
-import { LAGCOMP, shipConfig, type WeaponConfig } from "../../config";
+import { shipConfig, type WeaponConfig } from "../../config";
 import { isAlive, snapDirection } from "../player";
 import type { Player, Projectile, ProjectileKind, StepContext } from "../types";
 import type { World } from "../world";
 
 /**
- * Pipeline step 3 — firing. Each player whose input requests it spawns a bullet
- * and/or bomb, gated by that weapon's cooldown and energy. New projectiles are
- * tagged with the firer as `owner` (so M1 can credit kills and skip self-hits)
- * and with the firer's lag-compensation rewind (`compTicks`, M2.9 — derived from
- * the input's `renderTick`).
+ * Pipeline step 3 — firing. Each player this node defends whose input requests it
+ * spawns a bullet and/or bomb, gated by that weapon's cooldown and energy. New
+ * projectiles are tagged with the firer as `owner` (so the damage path can credit
+ * kills and skip self-hits).
  */
 export function firingSystem(world: World, ctx: StepContext): void {
   for (const player of world.players.values()) {
+    if (!world.defendsPlayer(player.id)) continue; // a mirror — its own node fires for it
     if (!isAlive(player)) continue; // dead ships can't fire
     const input = ctx.inputs.get(player.id);
     if (!input) continue;
 
-    const comp = compTicksFor(world, input.renderTick);
     if (input.fire) {
       const p = tryFire(world, player, "bullet");
-      if (p) {
-        if (comp > 0) p.compTicks = comp;
-        world.projectiles.push(p);
-      }
+      if (p) world.projectiles.push(p);
     }
     if (input.bomb) {
       const p = tryFire(world, player, "bomb");
-      if (p) {
-        if (comp > 0) p.compTicks = comp;
-        world.projectiles.push(p);
-      }
+      if (p) world.projectiles.push(p);
     }
   }
-}
-
-/**
- * How many ticks back to rewind targets for a shot fired this tick from a view at
- * `renderTick` (M2.9). `world.tick − renderTick` is the gap between where the
- * server is now and the (past) view the firer was aiming through. Clamped:
- *   - `≥ 0`  — a future/absent renderTick means no compensation (test present).
- *   - `≤ maxCompTicks` — bounds the favour-the-shooter unfairness so a laggy or
- *     spoofed client can't rewind targets arbitrarily far.
- *   - `< historyTicks` — can't reach further back than the ring records.
- */
-function compTicksFor(world: World, renderTick: number | undefined): number {
-  if (renderTick === undefined) return 0;
-  const raw = world.tick - renderTick;
-  if (raw <= 0) return 0;
-  return Math.min(raw, LAGCOMP.maxCompTicks, LAGCOMP.historyTicks - 1);
 }
 
 /** Fire one weapon if its cooldown is clear and there's energy for it. Returns

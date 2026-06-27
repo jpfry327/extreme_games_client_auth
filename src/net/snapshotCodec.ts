@@ -214,8 +214,6 @@ function blankPlayer(id: PlayerId): Player {
 }
 
 // --- Projectile schema -------------------------------------------------------
-// `spawnSeq` is deliberately absent: it's a client-only prediction tag the server
-// never sets, so it's never on the wire (matching today's server snapshots).
 
 const PROJ_FIELDS: FieldDef<Projectile>[] = [
   { kind: "u8", get: (p) => (p.kind === "bomb" ? 1 : 0), set: (p, v) => (p.kind = v === 1 ? "bomb" : "bullet") },
@@ -230,7 +228,6 @@ const PROJ_FIELDS: FieldDef<Projectile>[] = [
   { kind: "varinf", get: (p) => p.bounces, set: (p, v) => (p.bounces = v as number) },
   { kind: "f32", get: (p) => p.radius, set: (p, v) => (p.radius = v as number) },
   { kind: "bool", get: (p) => p.alive, set: (p, v) => (p.alive = v as boolean) },
-  { kind: "optnum", get: (p) => p.compTicks, set: (p, v) => (p.compTicks = v as number | undefined) },
 ];
 
 function blankProjectile(id: number): Projectile {
@@ -385,7 +382,6 @@ function writeEvents(w: ByteWriter, events: GameEvent[]): void {
         w.writeF32(e.x);
         w.writeF32(e.y);
         w.writeBool(e.fatal);
-        w.writeBool(e.rewound);
         break;
       case "shipDied":
         w.writeU8(EV_DIED);
@@ -419,8 +415,7 @@ function readEvents(r: ByteReader): GameEvent[] {
       const x = r.readF32();
       const y = r.readF32();
       const fatal = r.readBool();
-      const rewound = r.readBool();
-      events.push({ type: "shipHit", target, by, damage, x, y, fatal, rewound });
+      events.push({ type: "shipHit", target, by, damage, x, y, fatal });
     } else if (tag === EV_DIED) {
       const victim = r.readString();
       const killer = r.readString();

@@ -98,7 +98,7 @@ describe("snapshot codec — keyframe round-trip", () => {
       ...base,
       events: [
         { type: "bombExploded", x: 12.5, y: -3.25, owner: "enemy" },
-        { type: "shipHit", target: "me", by: "enemy", damage: 30, x: 1, y: 2, fatal: true, rewound: true },
+        { type: "shipHit", target: "me", by: "enemy", damage: 30, x: 1, y: 2, fatal: true },
         { type: "shipDied", victim: "me", killer: "enemy", bounty: 7, x: 3, y: 4 },
         { type: "shipDied", victim: "enemy", killer: null, bounty: 0, x: 5, y: 6 }, // wall death
         { type: "playerSpawned", player: "me", x: 100, y: 200 },

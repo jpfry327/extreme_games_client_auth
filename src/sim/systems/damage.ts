@@ -20,11 +20,10 @@ import type { World } from "../world";
  * projectiles out — this is the last system that needs their corpses.
  */
 export function damageSystem(world: World): void {
-  // 1. Bullet hits — flat, single-target. `rewound` rides from the collision step
-  //    so the client can flag lag-compensated hits (M2.9).
-  for (const { projectile, target, rewound } of world.contacts) {
+  // 1. Bullet hits — flat, single-target.
+  for (const { projectile, target } of world.contacts) {
     const damage = weaponOf(world, projectile, "bullet");
-    applyDamage(world, target, projectile.owner, damage, target.kinematics.x, target.kinematics.y, rewound);
+    applyDamage(world, target, projectile.owner, damage, target.kinematics.x, target.kinematics.y);
   }
 
   // 2. Bomb blasts — any dead bomb still in the list detonated this tick.
@@ -40,45 +39,23 @@ export function damageSystem(world: World): void {
 }
 
 /** A bomb's area blast: damage every live enemy within `BombExplodePixels`,
- *  scaled down with distance, then announce the explosion for the renderer.
- *
- *  M2.9: the blast is **lag-compensated to the same `compTicks` the bomb carries**
- *  — distance is measured from the explosion to where each target was in the
- *  firer's view, not the present. This matters more than it sounds: a Subspace bomb
- *  deals *all* its damage through this splash (there's no separate direct-hit
- *  damage), and over a rewind window a moving ship is displaced far more than the
- *  ~18px blast radius — so a present-based blast detonating on the ghost would do
- *  ~zero damage to exactly the moving targets lag comp exists to let you hit. We
- *  rewind the blast test for parity with the direct-hit detection in the collision
- *  step, so a bomb that visually lands on an enemy actually kills it. */
+ *  scaled down with distance, then announce the explosion for the renderer. The
+ *  blast is tested against each target's present pose (the relay model adjudicates
+ *  at the present, on the defending node, so there is no rewind). */
 function detonateBomb(world: World, bomb: Projectile): void {
   world.events.push({ type: "bombExploded", x: bomb.x, y: bomb.y, owner: bomb.owner });
 
   const radius = COMBAT.bombExplodePixels;
   const full = weaponOf(world, bomb, "bomb");
-  const comp = bomb.compTicks ?? 0;
 
   for (const target of world.players.values()) {
     if (target.id === bomb.owner) continue; // own bomb is harmless (BombSafety)
+    if (!world.defendsPlayer(target.id)) continue; // only this node's defender takes the blast
     if (!isAlive(target)) continue;
 
-    // Resolve the pose the blast is tested against: the firer's view (lag comp) if
-    // this bomb was fired with compensation and the history slot is in range, else
-    // the present pose. A target that wasn't alive in the rewound view is skipped.
-    let tx = target.kinematics.x;
-    let ty = target.kinematics.y;
-    let tr = shipConfig(target.shipType).radius;
-    let rewound = false;
-    if (comp > 0) {
-      const past = world.history.lookup(world.tick - comp, target.id);
-      if (past) {
-        if (!past.alive) continue;
-        tx = past.x;
-        ty = past.y;
-        tr = past.radius;
-        rewound = true;
-      }
-    }
+    const tx = target.kinematics.x;
+    const ty = target.kinematics.y;
+    const tr = shipConfig(target.shipType).radius;
 
     // Distance from the blast to the ship's hull (center distance minus the
     // ship's radius), clamped at 0 so a direct hit takes full damage.
@@ -86,12 +63,11 @@ function detonateBomb(world: World, bomb: Projectile): void {
     if (surface >= radius) continue;
 
     const falloff = 1 - surface / radius; // 1 at center, 0 at the edge
-    applyDamage(world, target, bomb.owner, full * falloff, target.kinematics.x, target.kinematics.y, rewound);
+    applyDamage(world, target, bomb.owner, full * falloff, tx, ty);
   }
 }
 
-/** Subtract energy, remember the attacker for kill credit, and emit `shipHit`.
- *  `rewound` marks a hit awarded by lag compensation (M2.9) for the client. */
+/** Subtract energy, remember the attacker for kill credit, and emit `shipHit`. */
 function applyDamage(
   world: World,
   target: Player,
@@ -99,13 +75,12 @@ function applyDamage(
   damage: number,
   x: number,
   y: number,
-  rewound: boolean,
 ): void {
   if (damage <= 0) return;
   target.resources.energy -= damage;
   target.combat.lastHitBy = by;
   const fatal = target.resources.energy <= 0;
-  world.events.push({ type: "shipHit", target: target.id, by, damage, x, y, fatal, rewound });
+  world.events.push({ type: "shipHit", target: target.id, by, damage, x, y, fatal });
 }
 
 /** The weapon damage of a projectile's *firing* ship. If the owner has left,

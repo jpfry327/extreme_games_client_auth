@@ -78,6 +78,49 @@ Snapshots are **per-client** (`serializeSnapshotFor(world, playerId)`), which is
 
 ## Current milestone status
 
+### ⚑ Pivot: client-authoritative ("defender authority") relay model
+
+The project has **pivoted from server-authoritative netcode to the original Subspace
+client-authoritative model** (the roadmap's post-M2.12 decision gate). **If you die on
+your own screen, that is authoritative.** Each node runs an authoritative sim **only for
+the players it owns**: a client owns its local ship; the server owns its bot. The server
+is a **mirror + scoreboard relay** — it ingests each client's state, runs only its bot,
+scores deaths, and broadcasts the unchanged per-client binary delta snapshots.
+
+**The core inversion:** the client now sends **state, not intent** (`StateReportMsg`),
+inverting architecture.md §5's "client sends intent" rule for humans. Anti-cheat is
+**explicitly deferred** — this model is trivially cheatable by design (accepted).
+
+Key pieces:
+- **`sim/world.ts`** — `World.defends: Set<PlayerId> | null` (null = all, legacy) +
+  `scoresKills` gate which players a world simulates/kills and whether it credits kills.
+  `movement`/`firing`/`collision`/`damage`/`death`/`respawn` all skip non-defended players.
+- **`net/localSim.ts`** (`LocalSim`) — the authoritative self-simulator used by **both**
+  the client (for the human) and the server (for the bot). Free-runs at 100Hz; injects
+  incoming remote shots and adjudicates them against the owned ship at the **present**
+  (favour the defender — no lag comp).
+- **`net/relayHost.ts`** (`RelayHost`) — server mirror + bot defender + scoreboard, shared
+  by `net/server.ts` (loopback) and `server/index.ts` (WebSocket). Merges client reports
+  (preserving server-owned kills/score), scores the bot's death inline and human deaths
+  from `DeathReportMsg` ("defender names the killer", deduped by death count), and assembles
+  snapshots (projectile ids namespaced per owner).
+- **`net/protocol.ts`** — `StateReportMsg` (replaces `InputMsg`), `DeathReportMsg`,
+  `WelcomeMsg` carries the server-assigned spawn. `net/reportSender.ts` paces the uplink.
+- **Retired:** client prediction/reconciliation (`prediction.ts`, `reconciliationSmoother.ts`),
+  input streaming (`clientInput.ts`, `inputSender.ts`, `serverInput.ts`), predicted-hit cosmetics
+  (`predictedHits.ts`), and **all lag compensation** (`history.ts`, `compTicks`, `renderTick`,
+  `LAGCOMP`, the collision/bomb rewind branches) — the defender decides at the present.
+
+The KEPT downstream stack (binary delta codec, per-client AOI, entity interpolation,
+`RemoteProjectileSimulator`) is **unchanged** — only the *source* of snapshot rows moved
+from `world.step()` to client reports.
+
+---
+
+The standard server-authoritative netcode model (M2.0–M2.15) below is the *pre-pivot*
+history (it still describes the kept snapshot/AOI/interpolation machinery; the
+prediction/lag-comp parts are now retired per the pivot above).
+
 Per `docs/roadmap.md`, the full standard netcode model (M2.0–M2.10) is complete, and
 the M2.11+ responsiveness/efficiency pass is underway. The sequence is:
 ```

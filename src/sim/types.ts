@@ -16,8 +16,10 @@ export type PlayerId = string;
 /** Frequency / team number. Single-team in M0. */
 export type TeamId = number;
 
-/** One frame of player intent, sampled from the keyboard each render frame.
- *  The client sends *intent*, never state (architecture §5). This grows to
+/** One frame of player intent, sampled from the keyboard each render frame and
+ *  fed to the player's own `LocalSim`. In the client-authoritative relay model
+ *  this is a **local-only** type — it is never sent over the wire (the client
+ *  reports authoritative *state*, not intent — see `net/protocol.ts`). It grows to
  *  carry use-item / change-ship / chat in later milestones. */
 export interface InputCommand {
   rotateLeft: boolean;
@@ -31,24 +33,8 @@ export interface InputCommand {
   /** Debug/admin command: warp the bot (ChaosBot) to a fixed distance from the
    *  player who issued it. Edge-triggered server-side (see `warpSystem`), so
    *  holding the key warps once, not every tick. Optional: absent means "no warp"
-   *  — the same convention the bot's IDLE input and snapshot-replayed commands
-   *  use (they never set it). */
+   *  — the same convention the bot's IDLE input uses (it never sets it). */
   warp?: boolean;
-
-  /** Server-side lag compensation (M2.9). The server tick the client's *render
-   *  view* corresponded to when it sampled this command — the straddling snapshot
-   *  ticks blended by the interpolation `t` it was looking through (the firer is
-   *  always aiming at remote ships rendered `interpDelayMs` in the past). When
-   *  this command spawns a shot the firing system stamps the rewind it implies
-   *  onto the projectile (`compTicks`), and the collision test reaches that far
-   *  back into `world.history` to favour the shooter.
-   *
-   *  Carried *on the input* (not read from a wall clock) so the rewind is
-   *  input-derived and the server stays a pure function of its inputs — two worlds
-   *  fed the same commands still step identically (the determinism contract).
-   *  Optional: absent (the bot, the local single-player world, a client that
-   *  didn't report) means "no compensation" — the hit tests the present. */
-  renderTick?: number;
 }
 
 /** What `step()` receives each tick: every player's intent for this tick,
@@ -175,22 +161,6 @@ export interface Projectile {
 
   prevX: number;
   prevY: number;
-
-  /** Server-side lag compensation (M2.9): how many ticks back the firer's view
-   *  was when this shot was fired (`spawnTick − input.renderTick`, clamped ≥ 0 and
-   *  to the history length / `maxCompTicks`). Carried for the projectile's whole
-   *  life so every flight-tick collision test reaches `compTicks` into the past —
-   *  the shot still *flies* in the present (so it looks right to the firer who
-   *  predicted it); only the overlap *test* rewinds. Pure data, set by the firing
-   *  system. Absent / 0 means "no compensation" (test the present). */
-  compTicks?: number;
-
-  /** Client-only prediction tag (M2.6): the input `seq` that spawned this
-   *  projectile while replaying un-acked inputs. Used to give a predicted shot a
-   *  stable view id across the predictor's per-frame rebuild. Never set by the
-   *  sim (`World.step` ignores it) — set by the client `Predictor` only, so it
-   *  doesn't affect server determinism. Absent on authoritative projectiles. */
-  spawnSeq?: number;
 }
 
 /** A projectile↔ship overlap found by the collision system (step 6) and consumed
@@ -199,11 +169,6 @@ export interface Projectile {
 export interface Contact {
   projectile: Projectile;
   target: Player;
-  /** M2.9: true when this overlap was resolved against the target's *historical*
-   *  pose (lag compensation rewound it) rather than its present position — i.e.
-   *  the hit was awarded by favouring the shooter. Surfaced on the `shipHit` event
-   *  so the debug overlay can flag rewind hits vs present hits. */
-  rewound: boolean;
 }
 
 // --- Events (Layer C) --------------------------------------------------------
@@ -236,15 +201,6 @@ export interface ShipHitEvent {
   x: number;
   y: number;
   fatal: boolean;
-  /** M2.9: this hit was awarded by lag compensation — the overlap was tested
-   *  against the target's rewound (historical) pose, not its present one. Lets the
-   *  client distinguish a "what you saw is what you hit" rewind hit from a present
-   *  hit. Set for both direct bullet hits and bomb-splash damage: the blast is
-   *  rewound to the firer's view too (see `detonateBomb`), since a Subspace bomb
-   *  deals all its damage through splash and a present-based blast would miss the
-   *  very moving targets lag comp exists to let you hit. False only when the test
-   *  fell back to the present pose (no `compTicks`, or the history slot evicted). */
-  rewound: boolean;
 }
 
 /** A ship died. Drives the death explosion, the kill feed, and (later) audio.

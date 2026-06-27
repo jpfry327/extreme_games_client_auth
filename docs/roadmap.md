@@ -1,5 +1,14 @@
 # Roadmap
 
+> **⚑ Netcode pivot (post-M2.12 decision gate taken).** The project has switched from
+> server-authoritative netcode to the original Subspace **client-authoritative ("defender
+> authority") relay model**: each node simulates only the ships it owns, the server is a
+> mirror/scoreboard relay, and **the defending client decides its own death**. The client
+> now sends *state*, not intent. Server-side prediction, reconciliation, and lag
+> compensation are retired; the snapshot/AOI/interpolation stack is kept. See the pivot
+> section in `CLAUDE.md` and the design in `net/localSim.ts` / `net/relayHost.ts`.
+> Anti-cheat is deferred. The M2 material below is retained as pre-pivot history.
+
 The build order. Each milestone is sequenced by **dependency** and ends in a
 **playable build** — never a half-wired refactor you can't run. Features are
 sequenced so the **shared systems** (damage, status, items, UI toolkit) land
