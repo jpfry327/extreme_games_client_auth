@@ -189,6 +189,12 @@ export interface BombExplodedEvent {
    *  everyone else's (which arrive on the snapshot timeline), so it can suppress
    *  the delayed server copy of an explosion it already drew. */
   owner: PlayerId;
+  /** The detonating bomb's stable projectile id. Set on every locally-simulated
+   *  detonation so the client can suppress the stray far-wall blast of one of its
+   *  *own* bombs that already drew a cosmetic hit on an enemy (see `cosmeticHits.ts`
+   *  / `main.ts`). Optional because it does not survive the snapshot wire form — it
+   *  is only used for the node's own un-serialized LocalSim events. */
+  id?: number;
 }
 
 /** A ship took damage. Carries enough for a hit flash / sound and a damage

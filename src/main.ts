@@ -303,17 +303,27 @@ async function main() {
           !(e.type === "shipHit" && e.by === localId),
       );
     }
-    for (const e of localEvents) view.events.push(e);
+    for (const e of localEvents) {
+      // A bomb we already drew a cosmetic blast for (it "hit" an enemy as drawn)
+      // keeps flying invisibly in our LocalSim — it has to stay alive + reported so
+      // the defender adjudicates the real hit — and later detonates on a wall. Drop
+      // that stray far-wall blast so we don't draw the same bomb exploding twice
+      // (its id is still in `cosmeticHits` until it's pruned by `detect()` below).
+      if (e.type === "bombExploded" && e.id !== undefined && cosmeticHits.isHit(e.id)) continue;
+      view.events.push(e);
+    }
 
     // (e) Projectiles: our own shots from LocalSim (present), everyone else's from
     //     the deterministic remote simulator (rendered at the ships' render time).
     //
     //     Visual-only hit feedback (defender-authority model): our own shots are
     //     never adjudicated against enemies on our screen, so they'd sail *through*
-    //     them. Detect an own shot overlapping an enemy *as drawn* and: show the
-    //     spark (bullet) / blast (bomb) immediately, stop drawing that shot, and
-    //     drop our local copy. The defender still owns the real hit — this is
-    //     purely cosmetic (and may, like Subspace, occasionally mark a miss).
+    //     them. Detect an own shot overlapping an enemy *as drawn* and show the
+    //     spark (bullet) / blast (bomb) immediately, then stop drawing that shot. We
+    //     do NOT drop it from the sim: it must keep flying so it stays in our state
+    //     report, or the defender would retract its injected copy before adjudicating
+    //     the real hit (the "bullets/bombs do no damage" bug). The defender owns the
+    //     real hit — this is purely cosmetic (and may, like Subspace, mark a miss).
     const ownShots = localSim.ownProjectiles();
     const enemies = [...view.players.values()].filter((p) => p.id !== localId);
     for (const h of cosmeticHits.detect(ownShots, enemies)) {
@@ -326,9 +336,6 @@ async function main() {
     for (const p of ownShots) {
       if (!cosmeticHits.isHit(p.id)) view.projectiles.push(p);
     }
-    // Drop the spent copies so a bullet doesn't fly on and a missed bomb doesn't
-    // stray-detonate on a far wall (the defender's injected copy is unaffected).
-    localSim.dropOwnProjectiles((id) => cosmeticHits.isHit(id));
     const remoteShots = remoteProjectiles.simulate(
       interp.snapshots,
       now,
@@ -336,7 +343,13 @@ async function main() {
       localId,
       NET.extrapolateMaxMs,
     );
-    for (const p of remoteShots) view.projectiles.push(p);
+    // Stop drawing a remote shot once our own LocalSim has consumed it (it hit us /
+    // a wall here): the firer never adjudicates its own shots, so its copy of a shot
+    // that hit us keeps flying through us and is still reported — without this the
+    // bullet/bomb visibly sails *through* you after the hit flash.
+    for (const p of remoteShots) {
+      if (!localSim.isIncomingConsumed(p.id)) view.projectiles.push(p);
+    }
 
     renderer.draw(view, 1, dt, latestPings);
 

@@ -43,7 +43,7 @@ export function damageSystem(world: World): void {
  *  blast is tested against each target's present pose (the relay model adjudicates
  *  at the present, on the defending node, so there is no rewind). */
 function detonateBomb(world: World, bomb: Projectile): void {
-  world.events.push({ type: "bombExploded", x: bomb.x, y: bomb.y, owner: bomb.owner });
+  world.events.push({ type: "bombExploded", x: bomb.x, y: bomb.y, owner: bomb.owner, id: bomb.id });
 
   const radius = COMBAT.bombExplodePixels;
   const full = weaponOf(world, bomb, "bomb");
