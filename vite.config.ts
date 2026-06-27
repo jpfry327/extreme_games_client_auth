@@ -7,11 +7,11 @@ import { defineConfig } from "vite";
 //
 // `base` is the subpath the app is served from. GitHub Pages serves a project
 // repo at `https://<user>.github.io/<repo>/`, so the production build must be
-// rooted at `/extreme_games/`; src/assets.ts prefixes every asset URL with
+// rooted at `/extreme_games_client_auth/`; src/assets.ts prefixes every asset URL with
 // import.meta.env.BASE_URL so they resolve under it. Dev stays at root `/` so the
 // `/ws` proxy and `npm run dev` are unaffected.
 export default defineConfig(({ command }) => ({
-  base: command === "build" ? "/extreme_games/" : "/",
+  base: command === "build" ? "/extreme_games_client_auth/" : "/",
   publicDir: "assets",
   server: {
     open: true,
