@@ -22,7 +22,7 @@
  * join always completes promptly even with heavy simulated loss.
  */
 
-import type { SequencedInput } from "./protocol";
+import type { DeathReportMsg, StateReportMsg } from "./protocol";
 import type { Snapshot } from "./snapshot";
 import type { SnapshotHandler, Transport } from "./transport";
 
@@ -62,11 +62,16 @@ export class SimulatedTransport implements Transport {
     this.inner.start();
   }
 
-  sendInput(inputs: readonly SequencedInput[]): void {
-    // Schedule the whole batch as a unit: a simulated drop/jitter hits the
-    // datagram as a whole, which is exactly the loss the M2.15 redundancy is
-    // designed to survive.
-    this.schedule(() => this.inner.sendInput(inputs));
+  sendState(report: StateReportMsg): void {
+    // Drop/jitter the state datagram as a unit. State is last-wins, so a dropped
+    // report is simply superseded by the next — no retransmit needed.
+    this.schedule(() => this.inner.sendState(report));
+  }
+
+  sendDeath(report: DeathReportMsg): void {
+    // A death may drop too; the client re-sends it every report-tick while dead
+    // and the server dedups by the victim's death count, so it still lands.
+    this.schedule(() => this.inner.sendDeath(report));
   }
 
   setSnapshotHandler(cb: SnapshotHandler): void {

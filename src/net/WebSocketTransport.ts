@@ -13,7 +13,7 @@
 
 import type { PlayerId } from "../sim/types";
 import type { Transport, SnapshotHandler } from "./transport";
-import type { ClientMsg, SequencedInput, ServerMsg } from "./protocol";
+import type { ClientMsg, DeathReportMsg, ServerMsg, StateReportMsg } from "./protocol";
 import type { Snapshot } from "./snapshot";
 import { decodeSnapshot, MissingBaselineError } from "./snapshotCodec";
 
@@ -33,9 +33,11 @@ export class WebSocketTransport implements Transport {
    *  outgoing input so it knows which baseline to delta against. -1 = none yet. */
   private ackSnapshotTick = -1;
 
-  /** Called once when the server sends `welcome`. After it fires, localPlayerId
-   *  is valid and the game loop can begin. */
-  onConnected: ((playerId: PlayerId) => void) | null = null;
+  /** Called once when the server sends `welcome`, with the server-assigned id, the
+   *  initial spawn pose, and the `LocalSim` seed. After it fires, localPlayerId is
+   *  valid and the game loop can begin. */
+  onConnected: ((playerId: PlayerId, spawn: { x: number; y: number }, seed: number) => void) | null =
+    null;
 
   /** Called if the server refuses the join (e.g. arena full — M2.7). The socket
    *  is closed by the server right after; the client should surface `reason`. */
@@ -69,12 +71,12 @@ export class WebSocketTransport implements Transport {
       const msg = JSON.parse(ev.data as string) as ServerMsg;
       if (msg.type === "welcome") {
         this.localPlayerId = msg.playerId;
-        this.onConnected?.(msg.playerId);
+        this.onConnected?.(msg.playerId, { x: msg.spawnX, y: msg.spawnY }, msg.seed);
       } else if (msg.type === "reject") {
         this.onRejected?.(msg.reason);
       }
-      // A "snapshot" type never arrives as JSON over the socket (it's binary);
-      // the SnapshotMsg shape is retained only for the in-process loopback.
+      // Snapshots never arrive as JSON over the socket — they're binary frames
+      // (handled above); only welcome/reject ride as JSON text.
     });
 
     this.socket.addEventListener("close", () => {
@@ -86,19 +88,19 @@ export class WebSocketTransport implements Transport {
     });
   }
 
-  sendInput(inputs: readonly SequencedInput[]): void {
+  sendState(report: StateReportMsg): void {
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return;
-    if (inputs.length === 0) return;
-    // M2.15: one datagram per batch (a frame's coalesced ticks + redundancy).
     // Piggyback the snapshot ack (M2.13): tell the server the newest tick we've
     // decoded so it deltas the next snapshot against that baseline. Omit until the
     // first snapshot arrives, so the server keyframes the opening frames.
-    const list = inputs as SequencedInput[];
-    const msg: ClientMsg =
-      this.ackSnapshotTick >= 0
-        ? { type: "input", inputs: list, ackSnapshotTick: this.ackSnapshotTick }
-        : { type: "input", inputs: list };
+    const msg: StateReportMsg =
+      this.ackSnapshotTick >= 0 ? { ...report, ackSnapshotTick: this.ackSnapshotTick } : report;
     this.send(msg);
+  }
+
+  sendDeath(report: DeathReportMsg): void {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return;
+    this.send(report);
   }
 
   /** Decode an incoming binary snapshot frame against our retained baselines,

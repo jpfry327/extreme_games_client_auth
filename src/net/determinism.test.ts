@@ -97,44 +97,6 @@ describe("determinism audit", () => {
     expect(a.rng.seed).toBe(b.rng.seed);
   });
 
-  // --- 1b. lag-compensated inputs stay deterministic (M2.9) ------------------
-
-  it("two worlds stay byte-identical when shots carry a renderTick rewind", () => {
-    const seed = 2024;
-    const a = new World(openMap(), seed);
-    const b = new World(openMap(), seed);
-    const viewer = a.localPlayerId;
-
-    // A static enemy 40px to the side, in both worlds, so the local player's fire
-    // collides — and now the collision is lag-compensated (the shot's renderTick
-    // rewinds the enemy). The rewind amount rides *in the input*, so the server
-    // stays a pure function of its inputs: both worlds must still agree every tick.
-    const setupEnemy = (w: World) => {
-      const e = w.addPlayer("enemy", "enemy", 1, WARBIRD);
-      const me = w.localPlayer.kinematics;
-      e.kinematics.x = e.kinematics.prevX = me.x + 40;
-      e.kinematics.y = e.kinematics.prevY = me.y;
-    };
-    setupEnemy(a);
-    setupEnemy(b);
-
-    let sawCompensatedShot = false;
-    for (let t = 0; t < 400; t++) {
-      // Stamp each command with a render tick ~8 ticks in the past (a typical
-      // interp delay), the way the client does from its straddling snapshot pair.
-      const cmd: InputCommand = { ...scriptedInput(t), renderTick: Math.max(0, a.tick - 8) };
-      const ctx: StepContext = { inputs: new Map([[viewer, cmd]]) };
-      a.step(ctx);
-      b.step(ctx);
-      expect(wireSnapshot(a, viewer)).toEqual(wireSnapshot(b, viewer));
-      if (a.projectiles.some((p) => (p.compTicks ?? 0) > 0)) sawCompensatedShot = true;
-    }
-
-    // The scenario must actually exercise compensation, not vacuously pass.
-    expect(sawCompensatedShot).toBe(true);
-    expect(a.rng.seed).toBe(b.rng.seed);
-  });
-
   // --- 2. rewind-and-replay reproduces the continuous run --------------------
 
   it("replaying the tail of an input stream from an authoritative pose reproduces the live world", () => {

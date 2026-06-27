@@ -9,9 +9,9 @@
  *
  * `serializeSnapshotFor(world, playerId)` builds a deep copy of the world for
  * one client, filtered to that client's area of interest (M2.14, `net/aoi.ts`).
- *
- * `applySnapshot(clientWorld, snap)` overwrites the client world entirely. The
- * client world is NEVER stepped — it is purely driven by these snapshots.
+ * On the receiving side the client never overwrites a world wholesale any more —
+ * the `SnapshotInterpolator` rebuilds the view world from buffered snapshots and
+ * the local ship is overlaid from the client's own `LocalSim` (relay model).
  */
 
 import type { GameEvent, Player, PlayerId, Projectile } from "../sim/types";
@@ -76,36 +76,27 @@ export function serializeSnapshotFor(
     inputBufferDepth: ack.inputBufferDepth,
     pings,
   };
-  // AOI cull (M2.14), then deep-copy only what's actually sent. No hysteresis
-  // state on the loopback (it has no per-client baseline ring), so a boundary
-  // entity could flicker — but loopback is zero-latency and the interpolator's
-  // join/respawn pin absorbs a clean re-entry, so it's cosmetic. The WebSocket
-  // path (SnapshotChannel) threads hysteresis where it actually matters.
-  const filtered = filterSnapshotFor(full, playerId, defaultAoiConfig());
-  return structuredClone(filtered);
+  return cullAndCloneFor(full, playerId, ack);
 }
 
 /**
- * Overwrite the client world with the snapshot's data. Clears all prior state
- * (players, projectiles) and replaces it wholesale — no diffing, no merging.
- * Events are pushed onto the client world so the renderer and kill-feed can
- * drain them just as they did before the network seam existed.
+ * AOI-cull an already-assembled shared snapshot for one recipient, stamp its
+ * per-client input-ack, and deep-copy what's actually sent (the structuredClone
+ * simulates the wire so neither side aliases the other). Used by the loopback
+ * relay path, which builds the shared snapshot itself (`RelayHost.assembleSnapshot`)
+ * rather than from a live `World`.
+ *
+ * No hysteresis state on the loopback (it has no per-client baseline ring), so a
+ * boundary entity could flicker — but loopback is zero-latency and the
+ * interpolator's join/respawn pin absorbs a clean re-entry, so it's cosmetic. The
+ * WebSocket path (`SnapshotChannel`) threads hysteresis where it matters.
  */
-export function applySnapshot(clientWorld: World, snap: Snapshot): void {
-  clientWorld.tick = snap.tick;
-
-  clientWorld.players.clear();
-  for (const p of snap.players) {
-    clientWorld.players.set(p.id, p);
-  }
-
-  clientWorld.projectiles.length = 0;
-  for (const proj of snap.projectiles) {
-    clientWorld.projectiles.push(proj);
-  }
-
-  clientWorld.events.length = 0;
-  for (const e of snap.events) {
-    clientWorld.events.push(e);
-  }
+export function cullAndCloneFor(full: Snapshot, playerId: PlayerId, ack: InputAck): Snapshot {
+  const withAck: Snapshot = {
+    ...full,
+    lastProcessedInputSeq: ack.lastProcessedInputSeq,
+    inputBufferDepth: ack.inputBufferDepth,
+  };
+  const filtered = filterSnapshotFor(withAck, playerId, defaultAoiConfig());
+  return structuredClone(filtered);
 }

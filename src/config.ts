@@ -165,26 +165,32 @@ export const COMBAT = {
   killPointsBase: 0,
 } as const;
 
-// --- Upstream input batching (M2.15) -----------------------------------------
-// The client coalesces a render frame's per-tick commands into one datagram and
-// re-sends the newest few un-acked inputs for redundancy, instead of one framed
-// message per 10ms tick (~100 msg/s). The server consumes one command per tick
-// and dedups the redundant overlap by `seq`, so the inputs themselves and the
-// M2.4 replay are unchanged — only the wire packaging differs.
+// --- Upstream state-report pacing (relay model) ------------------------------
+// In the client-authoritative relay model the client owns its ship and reports
+// its authoritative *state* (`net/reportSender.ts`), paced to this cadence. State
+// is last-wins, so a dropped report is simply superseded by the next — no
+// redundancy or retransmit needed (unlike the old input stream).
 export const INPUT = {
-  /** Upstream flush cadence (ms). ~16ms ≈ one per render frame ≈ 60Hz, which
-   *  sends inputs at essentially the same instant they go out today → ~0 added
-   *  uplink latency, just coalesced (~100 → ~60 msg/s). Raise toward ~33ms
-   *  (~30Hz) to cut packets further at the cost of up to that much added
-   *  input-uplink latency (NOT the downstream view of other players, which is
-   *  untouched). */
+  /** Uplink flush cadence (ms). ~16ms ≈ one per render frame ≈ 60Hz, so a report
+   *  leaves essentially the same instant the state is produced → ~0 added uplink
+   *  latency. Raise toward ~33ms (~30Hz) to cut packets at the cost of up to that
+   *  much added uplink latency (NOT the downstream view of other players). */
   sendIntervalMs: 16,
+} as const;
 
-  /** Redundancy: the newest N un-acked inputs are included in every datagram, so
-   *  a single dropped datagram is covered by the next one without a round-trip.
-   *  ~10 covers several lost datagrams at 60Hz; inputs are tiny so the byte cost
-   *  is negligible, and the server dedups the overlap by `seq`. */
-  redundantTicks: 10,
+// --- Relay server (client-authoritative model) -------------------------------
+// Server-side tunables for the mirror/relay (net/relayHost.ts) — NOT browser
+// values (those are in NET below).
+export const RELAY = {
+  /** If a client sends no state report for this long (ms), the server treats it
+   *  as "away" and stops relaying its (now-frozen) ship to the other clients — a
+   *  clean despawn, the minimal precursor to spectator mode. It reappears the
+   *  instant a report resumes. Comfortably above the ~16ms report cadence + normal
+   *  jitter so a live-but-slow client is never falsely hidden, yet low enough that
+   *  a truly suspended tab (its self-sim loop stalled) stops being an unkillable
+   *  frozen target within ~2s. The defender model can't kill a sleeping ship, so
+   *  the relay simply removes it from view until it wakes. */
+  inactiveTimeoutMs: 2000,
 } as const;
 
 // --- Networking (M2) ---------------------------------------------------------
@@ -244,19 +250,6 @@ export const NET = {
    *  fly-off. (roadmap M2.5: "extrapolation window + clamp") */
   extrapolateMaxMs: 100,
 
-  /** Reconciliation correction smoothing (roadmap M2.5). When a snapshot corrects
-   *  the predicted local ship, the residual error is absorbed into a render-offset
-   *  that decays to zero with this half-life rather than snapping. Smaller =
-   *  tighter/snappier correction; larger = floatier but gentler. 80ms ≈ the error
-   *  is ~halved every 5 frames at 60fps, gone within ~a quarter second. */
-  correctionHalfLifeMs: 80,
-
-  /** A correction bigger than this (px) is treated as a teleport — a respawn or a
-   *  genuine divergence — not a misprediction to smooth. Smoothing a map-spanning
-   *  jump would slide the ship visibly across the screen, so beyond this we drop
-   *  the offset and let it snap. ~9 ship-radii. */
-  maxSmoothDistancePx: 128,
-
   /** Default in-transport network-simulator parameters (roadmap M2.5). Applied
    *  symmetrically to each direction (client→server inputs and server→client
    *  snapshots). Off by default; toggled and tuned live from the #netsim debug
@@ -271,41 +264,6 @@ export const NET = {
     /** Per-packet drop chance, percent, each direction. */
     lossPct: 3,
   },
-} as const;
-
-// --- Server-side lag compensation (M2.9) -------------------------------------
-// "What you see is what you hit." The server adjudicates each projectile hit
-// against where its targets were in the *firer's* view at the moment the shot
-// was sampled — not the server's present — so a shot that visually connects on
-// your screen registers despite the interpolation delay (~interpDelayMs) and the
-// wire. The amount of rewind rides in each input (`InputCommand.renderTick`) and
-// is stamped onto the spawned projectile (`Projectile.compTicks`), so the server
-// stays a pure function of its inputs — the determinism contract still holds.
-export const LAGCOMP = {
-  /** Length of the server's per-tick pose-history ring (ticks). Must comfortably
-   *  exceed the largest rewind we ever apply — interpDelay (~7.5t @75ms) + max
-   *  RTT/2 + jitter — so a lookup `compTicks` ago is still in range. 120t = 1.2s
-   *  @100Hz, matching the roadmap's sizing. Runtime-only; never serialized. */
-  historyTicks: 120,
-
-  /** Hard cap on a single projectile's `compTicks` (ticks). The dial on the
-   *  favour-the-shooter trade: it bounds how far back a target can be rewound, so
-   *  a very laggy — or spoofed — client can't reach arbitrarily far into the past,
-   *  and — more importantly for *feel* — it bounds the "I dodged behind cover and
-   *  still got hit" unfairness the rewind imposes on the *victim* (the cost lag
-   *  comp pays to make the shooter feel instant).
-   *
-   *  25t = 250ms (top of the roadmap's 150–250ms band, and what CLAUDE.md
-   *  documents). M2.11 raised this from 15t (150ms) after the live ~100ms-RTT test:
-   *  the real *view* delay a shot must compensate is `interpDelayMs` (~75ms, now up
-   *  to `adaptiveInterp.maxMs` 200ms under jitter) **plus the full RTT**, i.e.
-   *  ~175ms at 100ms RTT — which the old 150ms cap clamped *below*, so connecting
-   *  shots were under-rewound and eaten ("bombs hit but don't register"). 250ms
-   *  covers interp + a ~150ms-RTT link with margin; players past that trade back to
-   *  some under-compensation rather than a larger victim-side dodge-then-die window.
-   *  Also implicitly capped by `historyTicks-1` (you can't rewind past what's
-   *  recorded; 120t = 1.2s leaves ample room). */
-  maxCompTicks: 25,
 } as const;
 
 // --- Area-of-interest culling (M2.14) ----------------------------------------

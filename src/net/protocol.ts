@@ -1,20 +1,16 @@
 /**
- * Wire protocol v0 — M2.1 / M2.3 message shapes for client↔server communication.
+ * Wire protocol — message shapes for the client-authoritative ("defender
+ * authority") relay model.
  *
- * JSON framing for now; binary is a later optimization. Three message types
- * cover the lifecycle: handshake (hello/welcome), input streaming, and state
- * delivery (snapshot). Chat, items, and ship-change will extend ClientMsg in
- * later milestones.
- *
- * M2.3 introduces the **fixed-tick input model**: the client produces exactly
- * one command per 10ms sim tick (not one per render frame), stamps each with a
- * monotonic `seq`, and sends every one. The server consumes them in order, one
- * per tick, and acks the highest `seq` it has processed in each snapshot. This
- * is the data plane client prediction & reconciliation (M2.4) will ride on.
+ * The client owns its ship and sends its **authoritative state** (`StateReportMsg`)
+ * plus a **death report** when it dies — the inverse of the old "client sends
+ * intent" rule. The server is a mirror/scoreboard relay: it ingests reports, runs
+ * only its own bot, and pushes per-client binary delta snapshots (encoded by
+ * `snapshotCodec.ts`, not the JSON shapes here). Control messages (hello/welcome/
+ * reject) are JSON text frames; snapshots are binary frames.
  */
 
-import type { InputCommand, PlayerId } from "../sim/types";
-import type { Snapshot } from "./snapshot";
+import type { Player, PlayerId, Projectile } from "../sim/types";
 
 // --- Client → Server ---
 
@@ -25,67 +21,71 @@ export interface HelloMsg {
 }
 
 /**
- * One player command, stamped for sequencing (M2.3). The client produces one
- * per sim tick and never drops them, so the server sees a continuous, ordered
- * command stream.
- *
- * - `seq`        — monotonic per client, starting at 1. The unit the server
- *                  acks and the client keys its un-acked ring buffer by.
- * - `clientTick` — the client sim tick this command was sampled for. Carried
- *                  for M2.4 (mapping replayed inputs back to ticks) and the
- *                  debug overlay's client-tick vs server-tick readout. In M2.3
- *                  it equals `seq` (one command per tick), but they are kept
- *                  distinct because the two counters diverge once prediction
- *                  resends / reorders inputs.
+ * The client's authoritative state report (primary uplink). The client owns its
+ * ship, simulates it locally, and reports its state; the server mirrors it into
+ * `world.players[id]` and relays it via the snapshot path, never simulating the
+ * human's combat.
  */
-export interface SequencedInput {
+export interface StateReportMsg {
+  type: "state";
+  /** Monotonic per client. Lets the server drop a stale / out-of-order datagram
+   *  (UDP-style: newest wins) without per-tick replay. */
   seq: number;
-  clientTick: number;
-  cmd: InputCommand;
-}
-
-/**
- * A batch of sequenced commands (M2.15). The client coalesces a render frame's
- * tick-commands into one datagram (~60Hz, not ~100Hz of individual frames) and
- * includes the newest few **un-acked** inputs for redundancy, so a dropped
- * datagram is covered by the next without a round-trip. `inputs` is ascending by
- * `seq`; the server consumes them one-per-tick and dedups re-sends by `seq`
- * (drops anything at/below the last processed seq, and duplicates already
- * queued), so the redundant overlap is free on the receive side.
- */
-export interface InputMsg {
-  type: "input";
-  /** Ascending by `seq`: this frame's new tick-commands plus redundant recent
-   *  un-acked ones. The server processes the new ones and ignores the overlap. */
-  inputs: SequencedInput[];
-  /** M2.13 — the newest snapshot tick the client has decoded, piggybacked on the
-   *  input stream (client → server). The server delta-encodes the next snapshot
-   *  against this acked baseline. Cumulative/monotonic: a lost input just delays
-   *  the ack by one, the server keeps using the last tick it heard. Absent until
-   *  the first snapshot is decoded. */
+  /** The reporting client's sim tick when sampled — overlay/debug only. */
+  tick: number;
+  /** The client's own authoritative `Player`. The server merges only the
+   *  **client-owned** fields (kinematics, resources, status, loadout,
+   *  combat.bounty / .deaths / .respawnAt) and preserves its own **server-owned**
+   *  scoreboard fields (combat.kills, combat.score) untouched. */
+  player: Player;
+  /** The client's own live projectiles — it owns its shots; the server relays
+   *  them, reassigning server-unique ids so ids stay unique across owners. */
+  projectiles: Projectile[];
+  /** M2.13 acked-baseline tick: drives the server's per-client delta baseline via
+   *  `SnapshotChannel.onAck`. Absent until the first snapshot is decoded. */
   ackSnapshotTick?: number;
 }
 
-export type ClientMsg = HelloMsg | InputMsg;
+/**
+ * Death report — sent when the client's own ship dies on its screen. "Defender
+ * names the killer": the dying client reports who killed it and what its bounty
+ * was worth; the server trusts it, credits the kill (`creditKill`), and emits the
+ * relayed `shipDied` for the kill feed / explosion everywhere. Trivially cheatable
+ * by design (anti-cheat deferred).
+ */
+export interface DeathReportMsg {
+  type: "death";
+  /** The dying client's own id (the victim). */
+  victim: PlayerId;
+  /** The victim's monotonic death count *after* this death (= `combat.deaths`).
+   *  Doubles as the death's identity: the client re-sends this report every
+   *  report-tick while dead (so a dropped datagram is covered without an ack), and
+   *  the server scores a given `deaths` value at most once per victim. */
+  deaths: number;
+  /** Owner of the killing weapon, or null for a self-inflicted / uncredited death. */
+  killer: PlayerId | null;
+  /** The victim's bounty at death — what the kill was worth (scored to killer). */
+  bounty: number;
+  x: number;
+  y: number;
+}
+
+export type ClientMsg = HelloMsg | StateReportMsg | DeathReportMsg;
 
 // --- Server → Client ---
 
-/** Server's reply to `hello` — assigns the player's canonical id for this
- *  session. The client must wait for this before starting the game loop. */
+/** Server's reply to `hello` — assigns the player's canonical id and the spawn the
+ *  server picked for it. The client seeds its `LocalSim` local player at this pose
+ *  (and with `seed`) so client and server agree on the start state before the first
+ *  state report. The client must wait for this before starting the game loop. */
 export interface WelcomeMsg {
   type: "welcome";
   playerId: PlayerId;
-}
-
-/** Snapshot pushed at ~33Hz. **M2.13: the wire form is now a binary frame**, not
- *  this JSON envelope — snapshots are sent as WebSocket *binary* messages encoded
- *  by `snapshotCodec.ts` (delta-compressed against the client's acked baseline),
- *  while the control messages here stay JSON *text* frames. The transport tells
- *  them apart by frame type (string vs ArrayBuffer). This interface is retained
- *  for the in-process loopback path, which still passes a plain `Snapshot`. */
-export interface SnapshotMsg {
-  type: "snapshot";
-  snap: Snapshot;
+  /** Server-assigned initial spawn. */
+  spawnX: number;
+  spawnY: number;
+  /** Seed for the client's `LocalSim` RNG (respawn spawn-point picks). */
+  seed: number;
 }
 
 /** Server's refusal of a `hello` — e.g. the arena is at its player cap (M2.7).
@@ -96,4 +96,6 @@ export interface RejectMsg {
   reason: string;
 }
 
-export type ServerMsg = WelcomeMsg | SnapshotMsg | RejectMsg;
+/** JSON server→client control messages. Snapshots are *binary* frames (the codec),
+ *  not part of this union. */
+export type ServerMsg = WelcomeMsg | RejectMsg;

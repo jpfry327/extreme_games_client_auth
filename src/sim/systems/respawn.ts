@@ -18,6 +18,7 @@ import type { World } from "../world";
  */
 export function respawnSystem(world: World): void {
   for (const player of world.players.values()) {
+    if (!world.defendsPlayer(player.id)) continue; // a mirror — its own node respawns it
     const respawnAt = player.combat.respawnAt;
     if (respawnAt === 0 || world.tick < respawnAt) continue;
     respawn(world, player);
