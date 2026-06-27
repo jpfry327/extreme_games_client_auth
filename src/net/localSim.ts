@@ -13,22 +13,36 @@
  *
  * The linchpin (see `collisionSystem`): the firer's own shots are skipped against
  * the only collision targets — the defended players — so a node never adjudicates
- * its *own* weapons (the defender does). Incoming remote shots, injected here and
- * flown at 100Hz, are tested against the owned ship at the **present** (favouring
- * the defender — no lag-comp rewind). Hits damage the owned ship; energy ≤ 0 kills
- * it locally; the node then reports the death.
+ * its *own* weapons (the defender does). Incoming remote shots are injected here
+ * and flown at 100Hz. Hits damage the owned ship; energy ≤ 0 kills it locally; the
+ * node then reports the death.
+ *
+ * **Render-time adjudication (the "what you see is what hits you" fix).** Remote
+ * bullets are *drawn* `interpDelay` in the past (on the same timeline as the remote
+ * ships that fired them — see `remoteProjectiles.ts`), but were historically *hit-
+ * tested* at the present, so a shot connected up to `interpDelay` of travel before
+ * it visually reached you — you'd "dodge a bomb on screen and die anyway". To close
+ * that gap each injected shot is **held out of the world for `incomingDelayTicks`
+ * (≈ interpDelay)** before it starts flying, so at any present tick its sim pose
+ * equals its drawn pose: the collision test then runs against the bullet exactly
+ * where it's drawn. The owned ship is still tested at the present (where it too is
+ * drawn — the local ship is never interpolated), so the overlap that kills you is
+ * the overlap you can see. The bot's server-side `LocalSim` leaves the delay at 0
+ * (a bot has no screen to be fair to, and present-time keeps it favouring itself).
  */
 
 import { createPlayer } from "../sim/player";
 import type { GameMap } from "../sim/gamemap";
 import type { InputCommand, Player, PlayerId, Projectile } from "../sim/types";
 import { World } from "../sim/world";
-import type { ShipType } from "../config";
+import { TICK_DT, type ShipType } from "../config";
 
-/** Bound on the remembered incoming-projectile ids (see `seen`). Comfortably
- *  larger than the live shot count; old ids are never re-reported once the owner's
- *  shot expires, so evicting the oldest is safe. */
-const MAX_SEEN = 1024;
+/** An injected incoming shot waiting to start flying — held until the world reaches
+ *  `releaseTick` so the shot is adjudicated where it's *drawn*, not ahead of it. */
+interface PendingShot {
+  proj: Projectile;
+  releaseTick: number;
+}
 
 /** Cheap structural clone of an incoming projectile so injecting it into our world
  *  doesn't alias the snapshot's object (which the interpolator still reads). */
@@ -45,21 +59,37 @@ export class LocalSim {
   /** The ids this sim owns and decides death/respawn for. */
   private readonly defended: Set<PlayerId>;
 
-  /** Incoming-projectile ids already injected or spent here, so a redundant
-   *  re-report (the owner re-sends live shots) isn't simulated twice. Insertion-
-   *  ordered; evicts oldest past `MAX_SEEN`. */
-  private readonly seen = new Set<number>();
+  /** Highest incoming-projectile id already injected, per owner. Projectile ids are
+   *  monotonic per owner (`firingSystem` + the relay's per-owner id namespace), so
+   *  a shot whose id is ≤ the owner's watermark has already been injected (the owner
+   *  re-sends its live shots every report) or has long expired — either way it's
+   *  skipped. O(1) per shot and one entry per owner, so unlike a fixed-size "seen"
+   *  set there is no eviction window in which a still-live, still-re-sent shot could
+   *  be re-injected as a phantom duplicate. */
+  private readonly lastInjectedId = new Map<PlayerId, number>();
 
-  /** Incoming shots queued by `injectIncoming`, added to the world on the next
-   *  `step` so they're flown and adjudicated on the same tick boundary as the
-   *  owned ship. */
-  private pendingIncoming: Projectile[] = [];
+  /** Incoming shots queued by `injectIncoming`, released into the world once the
+   *  world reaches each shot's `releaseTick` (see render-time adjudication above). */
+  private pendingIncoming: PendingShot[] = [];
+
+  /** How long (sim ticks) to hold an injected incoming shot before it starts
+   *  flying, so it's adjudicated where it's drawn (≈ the client's interp delay).
+   *  0 = adjudicate at the present (the default; the server's bot sim keeps this). */
+  private incomingDelayTicks = 0;
 
   constructor(map: GameMap, defendedIds: readonly PlayerId[], seed = 1, scoresKills = false) {
     this.world = new World(map, seed, false);
     this.world.defends = new Set(defendedIds);
     this.world.scoresKills = scoresKills;
     this.defended = this.world.defends;
+  }
+
+  /** Set the incoming-shot adjudication delay from the client's live interpolation
+   *  delay (ms → ticks), so injected remote shots are hit-tested where they're
+   *  drawn (`now − interpDelay`) rather than at the present. Called each frame by
+   *  the client; left at 0 on the server's bot sim. */
+  setIncomingDelayMs(ms: number): void {
+    this.incomingDelayTicks = Math.max(0, Math.round(ms / (1000 * TICK_DT)));
   }
 
   /** Add an owned player at a known spawn pose (e.g. the welcome handshake's spawn,
@@ -88,23 +118,52 @@ export class LocalSim {
   }
 
   /** Queue incoming remote shots (owner not defended) to be flown and adjudicated
-   *  against the owned ship. Deduped by id against `seen`, so the owner's redundant
-   *  re-sends and a shot already spent here are ignored. */
+   *  against the owned ship. Deduped by the per-owner id watermark, so the owner's
+   *  redundant re-sends and a shot already spent here are ignored. Each new shot is
+   *  held for `incomingDelayTicks` so it's adjudicated where it's drawn. */
   injectIncoming(projectiles: Iterable<Projectile>): void {
     for (const p of projectiles) {
       if (this.defended.has(p.owner)) continue; // our own shot — never self-adjudicate
-      if (this.seen.has(p.id)) continue; // already injected or spent here
-      this.markSeen(p.id);
-      this.pendingIncoming.push(cloneProjectile(p));
+      const watermark = this.lastInjectedId.get(p.owner);
+      if (watermark !== undefined && p.id <= watermark) continue; // already injected / spent
+      this.lastInjectedId.set(p.owner, p.id);
+      this.pendingIncoming.push({
+        proj: cloneProjectile(p),
+        releaseTick: this.world.tick + this.incomingDelayTicks,
+      });
     }
   }
 
-  /** Advance one authoritative tick with the owned player's intent. Injects any
-   *  pending incoming shots first so they're present for this tick's collision. */
+  /** Drop already-injected incoming shots that have vanished from the latest report,
+   *  i.e. the owner's authoritative copy died (it hit a *wall* or a *third* player
+   *  we don't simulate) before our adjudication copy finished its independent flight.
+   *  Without this an injected shot keeps flying here forever and can kill us with a
+   *  bullet that no longer exists anywhere else and has already left our screen.
+   *
+   *  `reportedIds` is the id set of the live remote shots in the newest snapshot.
+   *  A shot absent from it has either died (retract — it can't keep being a threat)
+   *  or merely left our area of interest; in the latter case it is ≥ a weapon's full
+   *  reach away and can no longer hit us before expiring, so retracting it is safe
+   *  and the per-owner watermark correctly never re-injects it. Defended-owner shots
+   *  (our own) are never touched — their ids live in a different namespace. */
+  reconcileIncoming(reportedIds: ReadonlySet<number>): void {
+    this.world.projectiles = this.world.projectiles.filter(
+      (p) => this.defended.has(p.owner) || reportedIds.has(p.id),
+    );
+    this.pendingIncoming = this.pendingIncoming.filter((e) => reportedIds.has(e.proj.id));
+  }
+
+  /** Advance one authoritative tick with the owned player's intent. Releases any
+   *  held incoming shots whose delay has elapsed first, so they're present for this
+   *  tick's collision exactly when their drawn pose catches up to them. */
   step(inputs: Map<PlayerId, InputCommand>): void {
     if (this.pendingIncoming.length > 0) {
-      for (const p of this.pendingIncoming) this.world.projectiles.push(p);
-      this.pendingIncoming.length = 0;
+      const stillHeld: PendingShot[] = [];
+      for (const e of this.pendingIncoming) {
+        if (e.releaseTick <= this.world.tick) this.world.projectiles.push(e.proj);
+        else stillHeld.push(e);
+      }
+      this.pendingIncoming = stillHeld;
     }
     this.world.step({ inputs });
   }
@@ -114,7 +173,7 @@ export class LocalSim {
    *  keep-alive), so a backlog of remote shots doesn't flush in a single tick as a
    *  lethal barrage. Favours the defender: while suspended it was "away" (the relay
    *  despawned it for others), so it doesn't retroactively eat those shots. The
-   *  `seen` set still suppresses their re-injection from later snapshots. */
+   *  per-owner watermark still suppresses their re-injection from later snapshots. */
   clearIncoming(): void {
     this.pendingIncoming.length = 0;
   }
@@ -135,13 +194,5 @@ export class LocalSim {
     this.world.projectiles = this.world.projectiles.filter(
       (p) => !(this.defended.has(p.owner) && shouldDrop(p.id)),
     );
-  }
-
-  private markSeen(id: number): void {
-    this.seen.add(id);
-    if (this.seen.size > MAX_SEEN) {
-      const oldest = this.seen.values().next().value;
-      if (oldest !== undefined) this.seen.delete(oldest);
-    }
   }
 }

@@ -203,19 +203,22 @@ export class RelayHost {
 }
 
 /** Copy a client's authoritative (client-owned) fields into its server mirror,
- *  preserving the server-owned scoreboard fields (kills, score). The `combat`
- *  block is rebuilt with a spread (not assigned by reference) so this never
- *  mutates the caller's `reported.combat` — important on the loopback path where
- *  the report aliases the client's live `LocalSim` player. */
+ *  preserving the server-owned scoreboard fields (kills, score). Every component
+ *  block is rebuilt with a spread (not assigned by reference). The `combat` spread
+ *  is load-bearing (it re-overlays kills/score); the others matter on the loopback
+ *  path, where `reported` aliases the client's live `LocalSim` player whose
+ *  `kinematics` it mutates every tick — without the copy the mirror (and the
+ *  snapshot built from it) would silently track the client's *future* pose, not the
+ *  one it reported. All blocks are flat, so a shallow spread fully de-aliases them. */
 function mergeReport(mirror: Player, reported: Player): void {
   const { kills, score } = mirror.combat;
   mirror.name = reported.name;
   mirror.team = reported.team;
   mirror.shipType = reported.shipType;
-  mirror.kinematics = reported.kinematics;
-  mirror.resources = reported.resources;
-  mirror.loadout = reported.loadout;
-  mirror.status = reported.status;
+  mirror.kinematics = { ...reported.kinematics };
+  mirror.resources = { ...reported.resources };
+  mirror.loadout = { ...reported.loadout };
+  mirror.status = { ...reported.status };
   mirror.combat = { ...reported.combat, kills, score };
 }
 
