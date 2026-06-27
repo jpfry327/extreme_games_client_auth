@@ -86,8 +86,9 @@ export function filterSnapshotFor(
   });
 
   const projectiles = snap.projectiles.filter((proj) => {
-    // Own shots always reach you, even fired off your own screen — the firer needs
-    // the authoritative copy for prediction reconciliation and own-kill credit.
+    // Own shots always reach you, even fired off your own screen — in the relay
+    // model the firer owns its shots and the server relays its authoritative copy
+    // straight back (it never needs to adjudicate them against itself).
     if (proj.owner === viewerId) return true;
     return inViewBox(vx, vy, proj.x, proj.y, cfg);
   });

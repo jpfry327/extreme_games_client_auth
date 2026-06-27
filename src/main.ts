@@ -127,9 +127,14 @@ async function main() {
 
     if (localSim && localId !== null) {
       // Adjudicate incoming remote shots against our own ship: inject every shot we
-      // don't own (deduped by id inside LocalSim) so it flies and is tested at the
-      // present — "favour the defender".
-      localSim.injectIncoming(snap.projectiles.filter((p) => p.owner !== localId));
+      // don't own (deduped by id inside LocalSim). LocalSim holds each by the interp
+      // delay so it's hit-tested where it's drawn ("what you see is what hits you").
+      const incoming = snap.projectiles.filter((p) => p.owner !== localId);
+      localSim.injectIncoming(incoming);
+      // Retract any previously-injected shot that has vanished from this report — the
+      // owner's copy died (wall / a third player) before our copy finished flying, so
+      // it must stop being a threat instead of soldiering on as a ghost bullet.
+      localSim.reconcileIncoming(new Set(incoming.map((p) => p.id)));
       serverLocal = snap.players.find((p) => p.id === localId) ?? serverLocal;
     }
 
@@ -206,6 +211,10 @@ async function main() {
     // this frame so ships and bullets stay on one timeline.
     adaptiveInterp.update(health.meanIntervalMs, health.jitterMs, dt);
     const interpMs = adaptiveInterp.ms;
+    // Hold incoming remote shots by the same delay their drawn copies lag by, so the
+    // overlap that kills us is the overlap we can see (no "dodged it on screen but
+    // died"). Tracks the adaptive delay so a jittery link stays consistent.
+    localSim.setIncomingDelayMs(interpMs);
 
     // (a) Advance our authoritative LocalSim at fixed 100Hz with this frame's input.
     //     Each catch-up tick shares the one keyboard sample (the human pressed keys

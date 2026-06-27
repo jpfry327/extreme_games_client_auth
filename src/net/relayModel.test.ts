@@ -77,6 +77,46 @@ describe("LocalSim — defender authority", () => {
     expect(isAlive(me)).toBe(true);
   });
 
+  it("holds an incoming shot by the interp delay before adjudicating it (render-time)", () => {
+    const sim = new LocalSim(openMap(), ["me"]);
+    const me = sim.addOwned("me", "Me", 0, WARBIRD, 500, 500);
+    me.resources.energy = 5; // one bullet is fatal once it's released
+
+    sim.setIncomingDelayMs(30); // 30ms @ 100Hz = 3 ticks held
+    sim.injectIncoming([bulletAt("enemy", 1, 500, 500)]);
+
+    // Held: the shot isn't in the world yet, so nothing can be hit for the window.
+    for (let i = 0; i < 3; i++) sim.step(new Map());
+    expect(sim.world.events.some((e) => e.type === "shipHit")).toBe(false);
+    expect(isAlive(me)).toBe(true);
+
+    // The tick the delay elapses, the shot is released and adjudicated where it's drawn.
+    sim.step(new Map());
+    expect(sim.world.events.some((e) => e.type === "shipHit" && e.target === "me")).toBe(true);
+    expect(me.combat.respawnAt).toBeGreaterThan(0);
+  });
+
+  it("retracts an injected shot that vanished from the latest report (no ghost bullet)", () => {
+    const sim = new LocalSim(openMap(), ["me"]);
+    const me = sim.addOwned("me", "Me", 0, WARBIRD, 500, 500);
+    me.resources.energy = 100000;
+
+    // A shot approaching from the left — alive and flying, not yet on us.
+    const incoming: Projectile = { ...bulletAt("enemy", 1, 440, 500), vx: 5, life: 50 };
+    sim.injectIncoming([incoming]);
+    sim.step(new Map()); // it flies (no hit yet)
+    expect(sim.world.projectiles.some((p) => p.owner === "enemy")).toBe(true);
+
+    // The owner's copy died elsewhere → it's gone from the next report. Retract it.
+    sim.reconcileIncoming(new Set());
+    expect(sim.world.projectiles.some((p) => p.owner === "enemy")).toBe(false);
+
+    // It can never reach us now.
+    for (let i = 0; i < 40; i++) sim.step(new Map());
+    expect(me.resources.energy).toBe(100000);
+    expect(isAlive(me)).toBe(true);
+  });
+
   it("ignores a re-reported (already-seen) incoming shot", () => {
     const sim = new LocalSim(openMap(), ["me"]);
     const me = sim.addOwned("me", "Me", 0, WARBIRD, 500, 500);

@@ -23,9 +23,10 @@
  * rejected in M2.2. Keeping bullets on the ships' timeline fixes the bounce-jump
  * without detaching a shot from the ship that fired it.
  *
- * This is **not** server-side lag compensation / hit rewind (a separate Phase-2
- * feature for hit *fairness*). Hits and damage stay 100% server-authoritative;
- * this simulation is cosmetic-until-confirmed, exactly like predicted own-shots.
+ * This simulation is **cosmetic** — it only decides where a remote shot is *drawn*.
+ * In the client-authoritative relay model the shot that actually *hits* you is
+ * adjudicated by your own `LocalSim` (the defender), which holds each incoming shot
+ * by this same interp delay so its hit test lines up with this drawn pose.
  */
 
 import { TICK_DT } from "../config";
@@ -84,10 +85,11 @@ export class RemoteProjectileSimulator {
     const wholeTicks = Math.floor(stepTicks);
     const frac = stepTicks - wholeTicks; // sub-tick remainder for smooth motion
 
-    // Clone into the tiny world (structuredClone so stepping never mutates the
-    // buffered snapshot, which the next frame still interpolates from) and run
-    // the deterministic projectile step `wholeTicks` times.
-    this.world.projectiles = structuredClone(base);
+    // Clone into the tiny world so stepping never mutates the buffered snapshot
+    // (the next frame still interpolates from it), then run the deterministic
+    // projectile step `wholeTicks` times. A shallow per-element spread suffices —
+    // `Projectile` is flat — and is far cheaper than `structuredClone` at 60fps.
+    this.world.projectiles = base.map((p) => ({ ...p }));
     for (let i = 0; i < wholeTicks; i++) projectileSystem(this.world);
 
     let survivors = this.world.projectiles.filter((p) => p.alive);

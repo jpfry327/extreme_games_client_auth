@@ -7,8 +7,9 @@
  *   1. start() opens the socket.
  *   2. On open: sends `hello` with the player name.
  *   3. Server replies with `welcome` (assigns PlayerId); onConnected fires.
- *   4. Each sendInput() sends an `input` message.
- *   5. Incoming `snapshot` messages are forwarded to the registered handler.
+ *   4. sendState()/sendDeath() send the client's authoritative reports as JSON text
+ *      frames (relay model — the client reports state, not intent).
+ *   5. Incoming binary `snapshot` frames are decoded and forwarded to the handler.
  */
 
 import type { PlayerId } from "../sim/types";
