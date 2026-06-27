@@ -81,6 +81,9 @@ async function main() {
   window.addEventListener("keydown", (e) => {
     keepAlive.start();
     if (e.code === "KeyF") toggleFullscreen(mount).catch(console.error);
+    // R toggles the radar between its zoomed window and the full-map view. Like
+    // F, it's a view-only key handled here, not sim input (never reported).
+    if (e.code === "KeyR") renderer.toggleRadar();
   });
   if (!keyboardLockSupported()) {
     console.info(

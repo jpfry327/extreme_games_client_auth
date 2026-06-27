@@ -7,6 +7,7 @@ import type { Player } from "../sim/types";
 import type { World } from "../sim/world";
 import { EffectsLayer } from "./effects";
 import { NametagLayer } from "./nametags";
+import { RadarLayer } from "./radar";
 import { loadSheet } from "./textures";
 import { TileLayer } from "./tiles";
 
@@ -51,6 +52,9 @@ export class Renderer {
   private bursts!: EffectsLayer;
   // Player nametags (name + bounty), drawn above the ships.
   private nametags!: NametagLayer;
+  // Lower-right minimap. Lives on the stage (screen space), not in the world
+  // container, so it stays pinned while the world scrolls.
+  private radar!: RadarLayer;
   // When each live bomb last dropped a trail puff (real-time clock, ms),
   // keyed by projectile id so snapshot-replaced objects are tracked correctly.
   private lastTrailEmit = new Map<number, number>();
@@ -102,9 +106,22 @@ export class Renderer {
     this.nametags = new NametagLayer();
     this.world.addChild(this.nametags.container);
 
-    const onResize = () => this.tiles.resize(this.app.screen.width, this.app.screen.height);
+    // Radar overlay — added to the stage (not the world) so it's screen-fixed,
+    // and last so it draws over everything.
+    this.radar = new RadarLayer(map);
+    this.app.stage.addChild(this.radar.container);
+
+    const onResize = () => {
+      this.tiles.resize(this.app.screen.width, this.app.screen.height);
+      this.radar.resize(this.app.screen.width, this.app.screen.height);
+    };
     window.addEventListener("resize", onResize);
     onResize();
+  }
+
+  /** Toggle the radar between its zoomed window and the full-arena view. */
+  toggleRadar(): void {
+    this.radar.toggle();
   }
 
   /** Draw one frame, blending between the last two sim ticks by `alpha`.
@@ -131,6 +148,7 @@ export class Renderer {
     this.drawProjectiles(world, alpha);
     this.drawEffects(world, alpha, dtSeconds * 1000);
     this.nametags.update(world, alpha, pings);
+    this.radar.update(world, camX, camY, alpha);
   }
 
   /** Draw every player's ship, growing the sprite pool to fit. Each sprite is

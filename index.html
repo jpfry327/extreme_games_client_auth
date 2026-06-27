@@ -57,10 +57,11 @@
         text-shadow: 0 0 2px #000;
       }
       /* M2.5 network-simulator controls — pinned bottom-right, clear of the
-         netdebug readout (top-right) so the two never overlap. */
+         netdebug readout (top-right). Lifted above the radar minimap, which
+         occupies the bottom-right corner, so the two never overlap. */
       #netsim {
         position: fixed;
-        bottom: 8px;
+        bottom: 256px;
         right: 8px;
         color: #6cf;
         font: 11px/1.6 monospace;
@@ -104,7 +105,7 @@
       <label class="row"><span>jitter</span><input type="range" id="ns-jitter" min="0" max="150" step="5" /><span class="val" id="ns-jitter-val"></span></label>
       <label class="row"><span>loss</span><input type="range" id="ns-loss" min="0" max="30" step="1" /><span class="val" id="ns-loss-val"></span></label>
     </div>
-    <div id="help">arrows: rotate / thrust &nbsp;•&nbsp; Z (or ctrl): fire &nbsp;•&nbsp; Tab: bomb &nbsp;•&nbsp; shift: afterburner &nbsp;•&nbsp; F: fullscreen &nbsp;•&nbsp; W: warp ChaosBot &nbsp;•&nbsp;</div>
+    <div id="help">arrows: rotate / thrust &nbsp;•&nbsp; Z (or ctrl): fire &nbsp;•&nbsp; Tab: bomb &nbsp;•&nbsp; shift: afterburner &nbsp;•&nbsp; F: fullscreen &nbsp;•&nbsp; R: radar zoom &nbsp;•&nbsp; W: warp ChaosBot &nbsp;•&nbsp;</div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

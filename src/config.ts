@@ -305,3 +305,38 @@ export const AOI = {
    *  doesn't flicker in/out every frame. ~2 ship-radii of slack. */
   hysteresisPx: 96,
 } as const;
+
+// --- Radar -------------------------------------------------------------------
+// The lower-right minimap, ported from Subspace. Two modes (toggled with R):
+//  - zoomed (default): a player-centered window covering 1/`zoomFactor` of the
+//    map, the original `[Radar] MapZoomFactor` rule.
+//  - full: the whole arena scaled to fit the square (Subspace's full-map radar).
+// Colors are 0xRRGGBB. Note: the radar can only plot what the client actually
+// received, so other ships beyond the AOI cull (net/aoi.ts) won't appear — the
+// same range limit the main screen has.
+export const RADAR = {
+  /** Original `[Radar] MapZoomFactor`: the zoomed radar shows 1/zoomFactor of
+   *  the map across its width (8 -> a 128×128-tile window on the 1024² map). */
+  zoomFactor: 8,
+  /** Radar square edge as a fraction of the smaller screen dimension, clamped. */
+  sizeFrac: 0.2,
+  minSizePx: 120,
+  maxSizePx: 240,
+  /** Gap (px) from the bottom-right screen corner. */
+  marginPx: 8,
+  /** Backdrop fill + its opacity, and the border, so the radar reads over the
+   *  starfield. */
+  bgColor: 0x00040a,
+  bgAlpha: 0.55,
+  borderColor: 0x224458,
+  /** Map walls, drawn as a downscaled bitmap (see render/radar.ts). */
+  wallColor: 0x3a6a8c,
+  /** Player blips, colored relative to the local player. Stealthed enemies are
+   *  hidden here once stealth/X-radar land (M5) — see render/radar.ts. */
+  selfColor: 0xffe000,
+  teammateColor: 0x49d849,
+  enemyColor: 0xff4d4d,
+  /** Blip square edge (px) and the self-blip blink period (ms). */
+  blipSizePx: 3,
+  selfBlinkMs: 500,
+} as const;
