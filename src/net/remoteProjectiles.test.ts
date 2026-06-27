@@ -89,16 +89,17 @@ describe("remote-projectile simulation (M2.8)", () => {
     // Buffer: base at t0, plus a far-future snapshot so render time straddles the
     // pair (a = base) and the bullet is still listed (so it's not retracted).
     const t0 = 1000;
-    const interpDelayMs = 75;
+    const leadMs = 75;
     const buffer = [
       { snap: snapshot(0, [base]), receivedAt: t0 },
       { snap: snapshot(999, [bullet({ id: 1 })]), receivedAt: t0 + 10_000 },
     ];
     // Render time = t0 + K ticks → simulate steps exactly K whole ticks (frac 0).
+    // Forward model: renderTime = now + lead, so back the clock out by the lead.
     const renderTime = t0 + K * (1000 * TICK_DT);
-    const nowMs = renderTime + interpDelayMs;
+    const nowMs = renderTime - leadMs;
 
-    const out = sim.simulate(buffer, nowMs, interpDelayMs, LOCAL, 100);
+    const out = sim.simulate(buffer, nowMs, leadMs, LOCAL, 100);
     const truth = groundTruth(map, base, K);
 
     expect(out).toHaveLength(1);
@@ -126,16 +127,16 @@ describe("remote-projectile simulation (M2.8)", () => {
 
     const sim = new RemoteProjectileSimulator(map);
     const t0 = 1000;
-    const interpDelayMs = 75;
+    const leadMs = 75;
     const buffer = [
       { snap: snapshot(0, [a1, a2]), receivedAt: t0 },
       // newer straddling snapshot: only #1 survives
       { snap: snapshot(20, [bullet({ id: 1 })]), receivedAt: t0 + 10_000 },
     ];
     const renderTime = t0 + 10 * (1000 * TICK_DT);
-    const nowMs = renderTime + interpDelayMs;
+    const nowMs = renderTime - leadMs;
 
-    const out = sim.simulate(buffer, nowMs, interpDelayMs, LOCAL, 100);
+    const out = sim.simulate(buffer, nowMs, leadMs, LOCAL, 100);
 
     expect(out.map((p) => p.id)).toEqual([1]);
     // #1 reconciles to its simulated-forward pose without a pop (continuous path).

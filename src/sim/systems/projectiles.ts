@@ -20,8 +20,10 @@ export function projectileSystem(world: World): void {
   }
 }
 
-/** Advance one projectile by a tick: move, bounce or die on walls, age out. */
-function stepProjectile(p: Projectile, map: GameMap): void {
+/** Advance one projectile by a tick: move, bounce or die on walls, age out.
+ *  Exported so `net/localSim.ts` can fast-forward a freshly-injected incoming shot
+ *  to the present (the Subspace weapon catch-up) without running a full world step. */
+export function stepProjectile(p: Projectile, map: GameMap): void {
   p.prevX = p.x;
   p.prevY = p.y;
 

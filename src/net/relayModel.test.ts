@@ -77,23 +77,37 @@ describe("LocalSim — defender authority", () => {
     expect(isAlive(me)).toBe(true);
   });
 
-  it("holds an incoming shot by the interp delay before adjudicating it (render-time)", () => {
+  it("catches an incoming shot up to the present on inject (what you see is what hits)", () => {
+    // The reported pose of a remote shot is ~transit old; the defender fast-forwards
+    // it by the same lead the renderer draws it at, so it's adjudicated where it's
+    // drawn (the Continuum weapon catch-up) — not from its stale reported position.
     const sim = new LocalSim(openMap(), ["me"]);
     const me = sim.addOwned("me", "Me", 0, WARBIRD, 500, 500);
-    me.resources.energy = 5; // one bullet is fatal once it's released
+    me.resources.energy = 5; // one bullet is fatal once it reaches us
 
-    sim.setIncomingDelayMs(30); // 30ms @ 100Hz = 3 ticks held
-    sim.injectIncoming([bulletAt("enemy", 1, 500, 500)]);
+    sim.setIncomingLeadMs(50); // 50ms @ 100Hz = 5 ticks of catch-up
+    // Reported 5 ticks "behind" us: x=478 moving +4 px/tick. Catch-up flies it the
+    // 5 ticks to ≈(500,500) on inject, so it's on us immediately — not 5 ticks later.
+    sim.injectIncoming([{ ...bulletAt("enemy", 1, 478, 500), vx: 4, life: 50 }]);
 
-    // Held: the shot isn't in the world yet, so nothing can be hit for the window.
-    for (let i = 0; i < 3; i++) sim.step(new Map());
-    expect(sim.world.events.some((e) => e.type === "shipHit")).toBe(false);
-    expect(isAlive(me)).toBe(true);
-
-    // The tick the delay elapses, the shot is released and adjudicated where it's drawn.
+    // First step adjudicates the already-present shot — an immediate hit & death.
     sim.step(new Map());
     expect(sim.world.events.some((e) => e.type === "shipHit" && e.target === "me")).toBe(true);
     expect(me.combat.respawnAt).toBeGreaterThan(0);
+  });
+
+  it("without a lead, that same reported shot has NOT yet reached us (favours the defender)", () => {
+    // The inverse control: at lead 0 (e.g. the server's bot, or zero transit) the
+    // shot is adjudicated from its reported pose, so a shot reported 5 ticks short of
+    // us is still ~5 ticks away after one step — the defender is favoured by the gap.
+    const sim = new LocalSim(openMap(), ["me"]);
+    const me = sim.addOwned("me", "Me", 0, WARBIRD, 500, 500);
+    me.resources.energy = 5;
+
+    sim.injectIncoming([{ ...bulletAt("enemy", 1, 478, 500), vx: 4, life: 50 }]);
+    sim.step(new Map());
+    expect(sim.world.events.some((e) => e.type === "shipHit")).toBe(false);
+    expect(isAlive(me)).toBe(true);
   });
 
   it("retracts an injected shot that vanished from the latest report (no ghost bullet)", () => {

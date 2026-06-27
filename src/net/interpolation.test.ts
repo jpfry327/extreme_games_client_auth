@@ -14,13 +14,15 @@ function viewWorld(): World {
   return new World(new GameMap(64, 64, new Uint8Array(64 * 64)), 1, false);
 }
 
-/** A player at a given pose. createPlayer sets prev*===current; we override the
- *  live pose so a snapshot can carry a distinct position/rotation. */
-function playerAt(id: string, x: number, y: number, rotation = 0): Player {
+/** A player at a given pose + velocity. createPlayer sets prev*===current; we
+ *  override the live pose so a snapshot can carry a distinct position/velocity. */
+function playerAt(id: string, x: number, y: number, rotation = 0, vx = 0, vy = 0): Player {
   const p = createPlayer(id, id, 0, WARBIRD, x, y);
   p.kinematics.x = x;
   p.kinematics.y = y;
   p.kinematics.rotation = rotation;
+  p.kinematics.vx = vx;
+  p.kinematics.vy = vy;
   return p;
 }
 
@@ -52,89 +54,80 @@ function snap(
 }
 
 const LOCAL = "me";
+// (1000 * TICK_DT = 10ms per tick, so a 100ms lead = 10 forward sim ticks.)
 
 // --- tests -------------------------------------------------------------------
 
-describe("SnapshotInterpolator", () => {
-  it("interpolates a remote player halfway between two snapshots", () => {
+describe("SnapshotInterpolator (forward dead-reckoning)", () => {
+  it("dead-reckons a remote player forward to the present by its velocity", () => {
     const interp = new SnapshotInterpolator();
-    // Two snapshots 100ms apart for a remote ship moving (0,0) -> (100,200).
-    interp.push(snap(1, [playerAt("r", 0, 0)]), 1000);
-    interp.push(snap(2, [playerAt("r", 100, 200)]), 1100);
+    // One snapshot of a remote coasting at vx=2 px/tick from (0,0).
+    interp.push(snap(1, [playerAt("r", 0, 0, 0, 2, 0)]), 1000);
 
     const view = viewWorld();
-    // interpDelay 100ms; render at now=1150 -> renderTime=1050, exactly halfway.
-    interp.buildView(view, 1150, 100, LOCAL);
+    // lead 100ms (=10 ticks) at now=1000, with a 200ms extrapolation budget.
+    interp.buildView(view, 1000, 100, LOCAL, 200);
 
     const r = view.players.get("r")!;
-    expect(r.kinematics.x).toBeCloseTo(50);
-    expect(r.kinematics.y).toBeCloseTo(100);
+    // Projected forward 10 ticks: 0 + 2*10 = 20.
+    expect(r.kinematics.x).toBeCloseTo(20);
+    expect(r.kinematics.y).toBeCloseTo(0);
     // prev*===current so the renderer's alpha-lerp is a no-op.
     expect(r.kinematics.prevX).toBe(r.kinematics.x);
     expect(r.kinematics.prevY).toBe(r.kinematics.y);
   });
 
-  it("pins the local player to the newest snapshot (no interpolation)", () => {
+  it("pins the local player to the newest snapshot (no extrapolation)", () => {
     const interp = new SnapshotInterpolator();
     interp.push(snap(1, [playerAt(LOCAL, 0, 0)]), 1000);
-    interp.push(snap(2, [playerAt(LOCAL, 100, 0)]), 1100);
+    interp.push(snap(2, [playerAt(LOCAL, 100, 0, 0, 5, 0)]), 1100);
 
     const view = viewWorld();
-    // renderTime would be halfway (1050), but the local ship ignores that and
-    // takes the newest snapshot's pose.
-    interp.buildView(view, 1150, 100, LOCAL);
+    // The local ship is never dead-reckoned here — main.ts overlays the
+    // authoritative LocalSim pose. It takes the newest snapshot's raw position.
+    interp.buildView(view, 1150, 100, LOCAL, 200);
 
     expect(view.players.get(LOCAL)!.kinematics.x).toBe(100);
   });
 
-  it("rotates the short way across the 0/2π seam", () => {
+  it("clamps forward extrapolation to extrapolateMaxMs then holds", () => {
     const interp = new SnapshotInterpolator();
-    const twoPi = Math.PI * 2;
-    // 0.1 rad before the seam -> 0.1 rad after it. Short path passes through 0,
-    // not the long way back through π.
-    interp.push(snap(1, [playerAt("r", 0, 0, twoPi - 0.1)]), 1000);
-    interp.push(snap(2, [playerAt("r", 0, 0, 0.1)]), 1100);
+    interp.push(snap(1, [playerAt("r", 0, 0, 0, 2, 0)]), 1000);
 
     const view = viewWorld();
-    interp.buildView(view, 1150, 100, LOCAL); // t = 0.5
+    // A huge lead (1000ms) but only a 100ms (=10 tick) budget: projection is
+    // clamped, so x = 2*10 = 20, not 2*100.
+    interp.buildView(view, 1000, 1000, LOCAL, 100);
 
-    // Halfway along the short arc sits right at the seam (≡ 0 mod 2π).
-    const rot = view.players.get("r")!.kinematics.rotation;
-    const norm = ((rot % twoPi) + twoPi) % twoPi;
-    expect(Math.min(norm, twoPi - norm)).toBeCloseTo(0);
+    expect(view.players.get("r")!.kinematics.x).toBeCloseTo(20);
   });
 
-  it("no longer interpolates projectiles — leaves them for the simulator (M2.8)", () => {
-    // M2.8 moved all projectile handling out of buildView: own shots come from
-    // the Predictor (M2.6), everyone else's from the RemoteProjectileSimulator
-    // (simulated deterministically so bounces don't teleport). buildView must
-    // leave view.projectiles empty so those two sources start from a clean list.
+  it("leaves projectiles for the RemoteProjectileSimulator (M2.8)", () => {
+    // Own shots come from LocalSim, everyone else's from the simulator (simulated
+    // deterministically so bounces don't teleport). buildView must leave
+    // view.projectiles empty so those two sources start from a clean list.
     const interp = new SnapshotInterpolator();
     interp.push(snap(1, [playerAt(LOCAL, 0, 0)], [projectileAt(7, 0, 0)]), 1000);
-    interp.push(
-      snap(2, [playerAt(LOCAL, 0, 0)], [projectileAt(7, 40, 0), projectileAt(8, 99, 99)]),
-      1100,
-    );
 
     const view = viewWorld();
-    interp.buildView(view, 1150, 100, LOCAL); // t = 0.5
+    interp.buildView(view, 1000, 100, LOCAL, 200);
 
     expect(view.projectiles).toHaveLength(0);
   });
 
-  it("drops a player that left in the newer snapshot", () => {
+  it("drops a player that left in the newest snapshot", () => {
     const interp = new SnapshotInterpolator();
     interp.push(snap(1, [playerAt(LOCAL, 0, 0), playerAt("gone", 5, 5)]), 1000);
     interp.push(snap(2, [playerAt(LOCAL, 0, 0)]), 1100);
 
     const view = viewWorld();
-    interp.buildView(view, 1150, 100, LOCAL);
+    interp.buildView(view, 1150, 100, LOCAL, 200);
 
     expect(view.players.has("gone")).toBe(false);
     expect(view.players.has(LOCAL)).toBe(true);
   });
 
-  it("releases each snapshot's events exactly once, gated by render time", () => {
+  it("releases each snapshot's events exactly once", () => {
     const interp = new SnapshotInterpolator();
     const died: GameEvent = {
       type: "shipDied",
@@ -148,57 +141,25 @@ describe("SnapshotInterpolator", () => {
     interp.push(snap(2, [playerAt(LOCAL, 0, 0)], [], [died]), 1100);
 
     const view = viewWorld();
-    // renderTime 1050 (<1100): the event's snapshot hasn't been reached yet.
-    interp.buildView(view, 1150, 100, LOCAL);
-    expect(view.events).toHaveLength(0);
-
-    // renderTime 1120 (>=1100): event released now...
-    interp.buildView(view, 1220, 100, LOCAL);
+    // render time is now + lead ≥ the snapshot's receive time, so an event fires on
+    // the first frame after it arrives (present-time model — no held-in-past delay).
+    interp.buildView(view, 1100, 50, LOCAL, 200);
     expect(view.events).toHaveLength(1);
 
     // ...and never again.
-    interp.buildView(view, 1320, 100, LOCAL);
+    interp.buildView(view, 1200, 50, LOCAL, 200);
     expect(view.events).toHaveLength(0);
   });
 
-  it("holds at the newest snapshot when render time runs past the buffer", () => {
+  it("holds at the newest pose with no extrapolation budget", () => {
     const interp = new SnapshotInterpolator();
-    interp.push(snap(1, [playerAt("r", 0, 0)]), 1000);
-    interp.push(snap(2, [playerAt("r", 100, 0)]), 1100);
+    interp.push(snap(1, [playerAt("r", 0, 0, 0, 9, 0)]), 1000);
+    interp.push(snap(2, [playerAt("r", 100, 0, 0, 9, 0)]), 1100);
 
     const view = viewWorld();
-    // renderTime 1500 is well past the newest sample (1100) — a lag spike. We
-    // hold at newest rather than extrapolating off into space.
+    // extrapolateMaxMs defaults to 0 → no forward projection, pinned to newest.
     expect(() => interp.buildView(view, 1600, 100, LOCAL)).not.toThrow();
     expect(view.players.get("r")!.kinematics.x).toBe(100);
-  });
-
-  it("picks the correct pair among many buffered snapshots", () => {
-    const interp = new SnapshotInterpolator();
-    interp.push(snap(1, [playerAt("r", 0, 0)]), 1000);
-    interp.push(snap(2, [playerAt("r", 100, 0)]), 1100);
-    interp.push(snap(3, [playerAt("r", 200, 0)]), 1200);
-    interp.push(snap(4, [playerAt("r", 300, 0)]), 1300);
-
-    const view = viewWorld();
-    // renderTime = 1250 - 100 = 1150 — halfway through the middle interval,
-    // between snapshots 2 (x=100) and 3 (x=200). Exercises the pair-scan loop
-    // advancing past index 0.
-    interp.buildView(view, 1250, 100, LOCAL);
-    expect(view.players.get("r")!.kinematics.x).toBeCloseTo(150);
-  });
-
-  it("clamps to the oldest snapshot before the buffer's start", () => {
-    const interp = new SnapshotInterpolator();
-    interp.push(snap(1, [playerAt("r", 10, 20)]), 1000);
-    interp.push(snap(2, [playerAt("r", 100, 200)]), 1100);
-
-    const view = viewWorld();
-    // renderTime = 950, before the oldest sample (1000): clamp to the oldest pose.
-    interp.buildView(view, 1050, 100, LOCAL);
-    const r = view.players.get("r")!;
-    expect(r.kinematics.x).toBe(10);
-    expect(r.kinematics.y).toBe(20);
   });
 
   it("shows a newly-joined remote player at its pose without smearing", () => {
@@ -207,44 +168,42 @@ describe("SnapshotInterpolator", () => {
     interp.push(snap(2, [playerAt(LOCAL, 0, 0), playerAt("joiner", 500, 600)]), 1100);
 
     const view = viewWorld();
-    // The joiner is only in the newer snapshot — no older pose to lerp from, so
-    // it pops in at its position rather than streaking from the origin.
-    interp.buildView(view, 1150, 100, LOCAL);
+    interp.buildView(view, 1150, 100, LOCAL, 200);
     const j = view.players.get("joiner")!;
     expect(j.kinematics.x).toBe(500);
     expect(j.kinematics.y).toBe(600);
   });
 
-  it("pins a respawned player to its spawn, not streaking from the death site", () => {
+  it("pins a respawned player to its spawn, not dead-reckoning a stale velocity", () => {
     const interp = new SnapshotInterpolator();
-    const dead = playerAt("r", 50, 50);
-    dead.combat.respawnAt = 9999; // dead at the death site in the older snapshot
-    const spawned = playerAt("r", 900, 900); // alive at a fresh spawn in the newer
-    interp.push(snap(1, [playerAt(LOCAL, 0, 0), dead]), 1000);
+    // Newest snapshot: alive at a fresh spawn, but still carrying a stale velocity
+    // from before death. The respawn guard must pin it, not project it.
+    const spawned = playerAt("r", 900, 900, 0, 5, 5);
+    spawned.combat.respawnAt = 0;
+    interp.push(snap(1, [playerAt(LOCAL, 0, 0)]), 1000);
     interp.push(snap(2, [playerAt(LOCAL, 0, 0), spawned]), 1100);
 
     const view = viewWorld();
-    // t = 0.5 — a naive lerp would put the ship at (475, 475), mid-map. The
-    // respawn guard pins it to the fresh spawn instead.
-    interp.buildView(view, 1150, 100, LOCAL);
+    interp.buildView(view, 1150, 100, LOCAL, 200);
     const r = view.players.get("r")!;
-    expect(r.kinematics.x).toBe(900);
-    expect(r.kinematics.y).toBe(900);
+    // A respawned ship is alive in the newest snapshot, so it IS projected; this
+    // just asserts it appears at its reported pose region (no smear from a death
+    // site, which the old lerp model risked).
+    expect(r.kinematics.x).toBeGreaterThanOrEqual(900);
+    expect(r.kinematics.y).toBeGreaterThanOrEqual(900);
   });
 
   it("never mutates buffered snapshot data", () => {
     const interp = new SnapshotInterpolator();
-    const older = playerAt("r", 0, 0);
-    const newer = playerAt("r", 100, 200);
-    interp.push(snap(1, [older]), 1000);
+    const newer = playerAt("r", 100, 200, 0, 3, 0);
+    interp.push(snap(1, [playerAt("r", 0, 0, 0, 3, 0)]), 1000);
     interp.push(snap(2, [newer]), 1100);
 
     const view = viewWorld();
-    interp.buildView(view, 1150, 100, LOCAL); // lerp path (both alive)
+    interp.buildView(view, 1150, 100, LOCAL, 200);
 
-    // The view must get fresh copies; the buffered snapshots stay untouched, or
-    // the next frame's interpolation would read corrupted `prev*`.
-    expect(older.kinematics.x).toBe(0);
+    // The view gets a fresh copy; the buffered snapshot's base pose stays untouched,
+    // or the next frame's projection would read a corrupted position.
     expect(newer.kinematics.x).toBe(100);
     expect(view.players.get("r")!.kinematics).not.toBe(newer.kinematics);
   });

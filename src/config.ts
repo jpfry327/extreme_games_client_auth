@@ -197,58 +197,35 @@ export const RELAY = {
 // Client-side netcode tuning. The server's port + broadcast rate live in
 // server/index.ts; these are values the browser client needs.
 export const NET = {
-  /** How far in the past (ms) remote entities are rendered, so the client always
-   *  has two buffered snapshots straddling render time to interpolate between.
-   *  ~2 snapshots at the ~33Hz broadcast rate (≈30ms gap). Bigger = smoother under
-   *  jitter but more visible lag on other ships. (roadmap M2.2 / architecture §5.2)
+  /** Forward dead-reckoning lead (ms) — how far *ahead* the client extrapolates
+   *  remote entities so they're drawn (and incoming shots adjudicated) at their
+   *  **true present**, the Subspace/Continuum model (it dead-reckons remotes to
+   *  now, it does NOT render them in the past). The per-frame lead is estimated
+   *  from the link — `(localPing/2 + remotePing/2) + ½ snapshot-interval` — and
+   *  clamped here; see `computeLeadMs` in main.ts.
    *
-   *  Failure mode it guards: too small and a single late/jittered snapshot leaves
-   *  the buffer empty at render time, forcing extrapolation (below).
-   *
-   *  M2.11: this is now the **initial / fallback** value. When `adaptiveInterp` is
-   *  enabled the live delay is driven from measured snapshot spacing + jitter (see
-   *  `AdaptiveInterpDelay`), starting here and clamped to `[minMs, maxMs]`; with it
-   *  off, this fixed value is used as before. */
-  interpDelayMs: 75,
-
-  /** Adaptive interpolation delay (M2.11). Instead of a fixed `interpDelayMs`, the
-   *  client raises/lowers the delay to track the link: enough buffer to always have
-   *  a straddling snapshot pair (≈ spacing) plus a jitter cushion, so a jittery
-   *  connection stops starving the buffer (the "remote ships jump" symptom) without
-   *  permanently over-delaying a clean one.
-   *
-   *    target = clamp(meanIntervalMs * spacingFactor + jitterMs * jitterFactor,
-   *                   minMs, maxMs)
-   *
-   *  The live value eases toward `target` with an asymmetric half-life — raise fast
-   *  (avoid starvation now), lower slowly (don't add-then-remove lag on every
-   *  jitter blip), so the delay itself never visibly time-warps the remote ships. */
-  adaptiveInterp: {
-    enabled: true,
-    /** Floor (ms): never tighter than ~2 broadcast gaps at 33Hz. */
-    minMs: 50,
-    /** Ceiling (ms): cap the added lag; beyond this a link is just bad. Stays
-     *  within the lag-comp rewind budget so shots keep registering. */
-    maxMs: 200,
-    /** Multiple of the mean snapshot interval to buffer (≥1 → always a newer
-     *  sample to interpolate toward; 1.5 leaves half a gap of slack). */
-    spacingFactor: 1.5,
-    /** Multiple of measured jitter to add as cushion above the spacing term. */
-    jitterFactor: 2,
-    /** Half-life (ms) for *raising* the delay — fast, to outrun a starving buffer. */
-    raiseHalfLifeMs: 150,
-    /** Half-life (ms) for *lowering* it — slow, so transient jitter doesn't make
-     *  the delay itself jitter. */
-    lowerHalfLifeMs: 3000,
+   *  This replaced the old "render ~interpDelay in the past" model (below), which
+   *  was the root cause of the laggy defender-authority feel: the attacker aimed at
+   *  the target's *past* while the defender adjudicated near its *present*, a gap of
+   *  `interpDelay + RTT` that dominated even locally. Drawing/adjudicating at the
+   *  present collapses that gap to the un-modeled-motion residual. */
+  lead: {
+    /** Floor (ms). Locally (≈0 ping) the lead is just ½ the broadcast interval. */
+    minMs: 0,
+    /** Ceiling (ms). Caps how far we project a high-ping remote; beyond this the
+     *  defender is simply favoured by the excess latency (no lag comp, by design).
+     *  Kept ≤ `extrapolateMaxMs` so a normal lead is never clipped by the cap. */
+    maxMs: 120,
   },
 
-  /** When the snapshot buffer starves (a lag spike or a run of dropped snapshots
-   *  leaves no sample newer than render time), remote entities are dead-reckoned
-   *  forward from their last known velocity for at most this long, then frozen in
-   *  place. Caps how far a wrong guess can drift before the next snapshot snaps it
-   *  back — a small visible glide instead of either a hard freeze or an unbounded
-   *  fly-off. (roadmap M2.5: "extrapolation window + clamp") */
-  extrapolateMaxMs: 100,
+  /** Total forward dead-reckoning budget (ms) past the newest snapshot, = the
+   *  steady-state `lead` PLUS any staleness when snapshots stop arriving. Under
+   *  normal flow this is `lead + ~½ interval` (well under the cap); on a lag spike
+   *  or a run of dropped snapshots the entity keeps coasting on last velocity until
+   *  it hits this cap, then freezes — a small visible glide instead of a hard
+   *  freeze or an unbounded fly-off. Must exceed `lead.maxMs` so a normal lead is
+   *  never clipped. (roadmap M2.5: "extrapolation window + clamp") */
+  extrapolateMaxMs: 200,
 
   /** Default in-transport network-simulator parameters (roadmap M2.5). Applied
    *  symmetrically to each direction (client→server inputs and server→client

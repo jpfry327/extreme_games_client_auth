@@ -15,7 +15,6 @@ import { CosmeticHitDetector } from "./net/cosmeticHits";
 import { ReportSender } from "./net/reportSender";
 import type { DeathReportMsg, StateReportMsg } from "./net/protocol";
 import { NetHealth } from "./net/netHealth";
-import { AdaptiveInterpDelay } from "./net/adaptiveInterp";
 import { AudioKeepAlive } from "./audioKeepAlive";
 
 // To run without a server (in-process loopback), add these imports and use the
@@ -32,15 +31,15 @@ async function main() {
   // 1. Load the map.
   const map = await loadMap();
 
-  // 2. The view world — never stepped. The interpolator rebuilds it each frame
-  //    from buffered snapshots: remote ships are interpolated ~interpDelay in the
-  //    past (they glide instead of snapping at ~33Hz); the local ship is overlaid
-  //    from our own authoritative LocalSim below.
+  // 2. The view world — never stepped. The interpolator rebuilds it each frame from
+  //    buffered snapshots: remote ships are dead-reckoned forward to their *true
+  //    present* (now + lead), Subspace-style, so we aim at where they really are; the
+  //    local ship is overlaid from our own authoritative LocalSim below.
   const view = new World(map, 1, false);
   const interp = new SnapshotInterpolator();
   // Remote players' projectiles are simulated deterministically forward from the
-  // latest snapshot (so they bounce off walls in real time) and rendered at the
-  // same render time as remote ships (now − interpDelay).
+  // latest snapshot (so they bounce off walls in real time) and rendered at the same
+  // present (now + lead) as remote ships.
   const remoteProjectiles = new RemoteProjectileSimulator(map);
   // Visual-only hit feedback: in the defender-authority model our own shots are
   // never tested against enemies on our screen, so they sail *through* them until
@@ -68,9 +67,8 @@ async function main() {
   // fields (kills, score) from it for the HUD.
   let serverLocal: Player | null = null;
 
-  // Net-health telemetry for the overlay + the adaptive interpolation-delay feed.
+  // Net-health telemetry for the overlay + the forward-lead estimate.
   const health = new NetHealth();
-  const adaptiveInterp = new AdaptiveInterpDelay(NET.adaptiveInterp, NET.interpDelayMs);
   let latestPings: Record<string, number> = {};
   // Newest snapshot tick accepted; jitter can deliver snapshots out of order, so an
   // older-tick snapshot is stale and dropped to keep the buffer monotonic.
@@ -213,14 +211,22 @@ async function main() {
       return;
     }
 
-    // Ease the interpolation delay toward the measured link, then use it everywhere
-    // this frame so ships and bullets stay on one timeline.
-    adaptiveInterp.update(health.meanIntervalMs, health.jitterMs, dt);
-    const interpMs = adaptiveInterp.ms;
-    // Hold incoming remote shots by the same delay their drawn copies lag by, so the
-    // overlap that kills us is the overlap we can see (no "dodged it on screen but
-    // died"). Tracks the adaptive delay so a jittery link stays consistent.
-    localSim.setIncomingDelayMs(interpMs);
+    // Forward dead-reckoning lead: project remotes to their *true present* so we aim
+    // at where they really are (Subspace dead-reckons remotes to now, not into the
+    // past). Estimate the data's transit age from the link — our + the remote's
+    // half-RTT plus ½ a broadcast interval — and clamp. Used everywhere this frame so
+    // ships, their shots, and our incoming-shot adjudication stay on one timeline.
+    const halfIntervalMs = (health.meanIntervalMs > 0 ? health.meanIntervalMs : 30) / 2;
+    let remotePing = 0;
+    for (const id in latestPings) if (id !== localId) remotePing = Math.max(remotePing, latestPings[id]);
+    const localPing = latestPings[localId] ?? 0;
+    const leadMs = Math.max(
+      NET.lead.minMs,
+      Math.min(NET.lead.maxMs, localPing / 2 + remotePing / 2 + halfIntervalMs),
+    );
+    // Catch incoming remote shots up to that same present, so the overlap that kills
+    // us is the overlap we can see ("what you see is what hits you").
+    localSim.setIncomingLeadMs(leadMs);
 
     // (a) Advance our authoritative LocalSim at fixed 100Hz with this frame's input.
     //     Each catch-up tick shares the one keyboard sample (the human pressed keys
@@ -282,7 +288,7 @@ async function main() {
     // (d) Build the view from snapshots (remotes interpolated in the past), then
     //     overlay our own ship from LocalSim (present, authoritative). Kills/score
     //     come from the server (serverLocal); everything else from LocalSim.
-    interp.buildView(view, now, interpMs, localId, NET.extrapolateMaxMs);
+    interp.buildView(view, now, leadMs, localId, NET.extrapolateMaxMs);
     if (serverLocal) {
       me.combat.kills = serverLocal.combat.kills;
       me.combat.score = serverLocal.combat.score;
@@ -339,7 +345,7 @@ async function main() {
     const remoteShots = remoteProjectiles.simulate(
       interp.snapshots,
       now,
-      interpMs,
+      leadMs,
       localId,
       NET.extrapolateMaxMs,
     );
@@ -393,7 +399,7 @@ async function main() {
       `projectiles ${view.projectiles.length}`;
 
     // Netcode debug overlay — relay model: link health + the upstream report rate.
-    const straddle = pickStraddlingPair(interp.snapshots, now - interpMs, NET.extrapolateMaxMs);
+    const straddle = pickStraddlingPair(interp.snapshots, now + leadMs, NET.extrapolateMaxMs);
     const extrapMs = straddle?.extrapMs ?? 0;
     health.onFrame(dt, {
       bufferDepth: interp.snapshots.length,
@@ -409,7 +415,7 @@ async function main() {
       `ping ${ping}ms\n` +
       `jitter ±${health.jitterMs.toFixed(0)}ms\n` +
       `up ${reportSender.sendRateHz.toFixed(0)}/s (state reports)\n` +
-      `interp ${interpMs.toFixed(0)}ms  buf ${interp.snapshots.length}\n` +
+      `lead ${leadMs.toFixed(0)}ms  buf ${interp.snapshots.length}\n` +
       `loss ${hps.missed}/s  stale ${hps.stale}/s\n` +
       `extrap ${hps.extrapFrames}/s  freeze ${hps.freezeFrames}/s`;
 

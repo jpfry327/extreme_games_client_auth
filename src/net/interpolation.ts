@@ -1,11 +1,19 @@
 /**
- * Client-side snapshot interpolation — M2.2.
+ * Client-side snapshot dead-reckoning (Subspace-faithful present-time model).
  *
- * The server broadcasts full snapshots at ~33Hz but the renderer runs at ~60fps,
- * so applying each snapshot directly makes every entity snap 33×/sec. This module
- * smooths that out by rendering remote entities **~interpDelay in the past**,
- * interpolating between the two buffered snapshots that straddle that render time
- * (the canonical Source-engine approach — architecture §5.2, roadmap M2.2).
+ * The server broadcasts full snapshots at ~33Hz but the renderer runs at ~60fps.
+ * Rather than smooth that by rendering remotes **in the past** (the old M2.2
+ * Source-engine interpolation, which made the attacker aim at a target ~interpDelay
+ * stale while the defender adjudicated near its present — the laggy-feel root
+ * cause), this extrapolates each remote **forward to its true present**: render
+ * time is `now + leadMs`, so every entity is dead-reckoned along its last velocity
+ * from the newest snapshot. This mirrors Continuum, which simulates remote ships
+ * forward by the sender's ping to land at local "now" and keeps coasting them.
+ *
+ * Normal-case correction is sub-pixel (ships mostly coast; 33Hz leaves only un-
+ * modeled accel over ~30ms), so no explicit easing is needed; a warp/respawn pops
+ * cleanly (forward projection can't streak). The clamp + freeze on starvation is
+ * the only fallback (M2.5).
  *
  * The timeline is built from **client receive-time** (`performance.now()`), not
  * the server tick, so no clock-sync is needed.
@@ -139,28 +147,33 @@ export class SnapshotInterpolator {
   }
 
   /**
-   * Populate `view` with the interpolated world for render time `nowMs −
-   * interpDelayMs`. Remote *players* are lerped between the straddling snapshot
-   * pair; the local player is pinned to the newest snapshot (main.ts overlays the
-   * authoritative LocalSim pose). Projectiles are left empty here — main.ts fills
-   * them from LocalSim (own shots) + RemoteProjectileSimulator (remote shots).
-   * Released events (in interpolated time) are written to `view.events`.
+   * Populate `view` with the world dead-reckoned forward to render time `nowMs +
+   * leadMs` — the remote's **true present** (Subspace dead-reckons remotes to now;
+   * it does not render them in the past). Because render time is always ≥ the
+   * newest snapshot, each remote is extrapolated forward from that newest pose
+   * along its last velocity (the `pickStraddlingPair` "caught up to newest" path),
+   * clamped to `extrapolateMaxMs` then frozen. The lerp-between-pairs path only
+   * runs if `leadMs` is ever negative (it isn't). The local player is pinned to the
+   * newest snapshot (main.ts overlays the authoritative LocalSim pose). Projectiles
+   * are left empty here — main.ts fills them from LocalSim (own shots) +
+   * RemoteProjectileSimulator (remote shots). Released events are written to
+   * `view.events`.
    *
-   * On buffer starvation (render time is past the newest snapshot — a lag spike
-   * or a run of dropped snapshots) remote entities are dead-reckoned forward from
-   * their last velocity for up to `extrapolateMaxMs`, then frozen (M2.5).
+   * Forward extrapolation can't "streak" (it projects one pose, it doesn't lerp
+   * between two distant ones), so a warp/respawn just pops to the new pose — the
+   * `respawnAt`/missing-older guard in `interpolatePlayer` keeps even that clean.
    */
   buildView(
     view: World,
     nowMs: number,
-    interpDelayMs: number,
+    leadMs: number,
     localPlayerId: PlayerId,
     extrapolateMaxMs = 0,
   ): void {
     if (this.buffer.length === 0) return;
 
     const newest = this.buffer[this.buffer.length - 1];
-    const renderTime = nowMs - interpDelayMs;
+    const renderTime = nowMs + leadMs;
 
     // Pick the straddling snapshot pair a (older) .. b (newer). Shared with the
     // remote-projectile simulator (M2.8) so ships and bullets agree on the window.

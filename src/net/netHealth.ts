@@ -6,7 +6,8 @@
  * starves the interpolation buffer (remote ships jump), lost snapshots stall the
  * stream, and shots get under-compensated when the lag-comp rewind clamps. This
  * class turns all of that into numbers for the debug overlay, and feeds the two it
- * needs downstream — `meanIntervalMs` and `jitterMs` — to `AdaptiveInterpDelay`.
+ * needs downstream — `meanIntervalMs` and `jitterMs` — into the forward-lead
+ * estimate (`computeLeadMs` in main.ts).
  *
  * It is **pure measurement**: no sim state, no mutation of anything else. Two
  * inputs drive it — `onSnapshot`/`onStaleSnapshot` from the snapshot handler, and

@@ -16,17 +16,17 @@
  * bounces included. So instead of lerping streamed positions we take the latest
  * authoritative remote projectiles and **simulate them forward** to render time.
  *
- * Render time (the crux — roadmap M2.8): remote bullets are simulated to the
- * **same** render time as remote ships, `now − interpDelayMs`, *not* the true
- * present. Drawing them at present would require also extrapolating the remote
- * *ships* to present, which reintroduces the turn→overshoot→snap the roadmap
- * rejected in M2.2. Keeping bullets on the ships' timeline fixes the bounce-jump
- * without detaching a shot from the ship that fired it.
+ * Render time (the crux): remote bullets are simulated forward to the **same**
+ * render time as remote ships — now their **true present**, `now + leadMs` (the
+ * ships are dead-reckoned forward to present too, so there's no past timeline to
+ * keep them on). This still fixes the original bounce-jump (the shot traces its
+ * real bounce path rather than lerping through a corner) while putting it where the
+ * firer actually is *now*, so the attacker aims true.
  *
  * This simulation is **cosmetic** — it only decides where a remote shot is *drawn*.
  * In the client-authoritative relay model the shot that actually *hits* you is
- * adjudicated by your own `LocalSim` (the defender), which holds each incoming shot
- * by this same interp delay so its hit test lines up with this drawn pose.
+ * adjudicated by your own `LocalSim` (the defender), which catches each incoming
+ * shot up to this same present so its hit test lines up with this drawn pose.
  */
 
 import { TICK_DT } from "../config";
@@ -49,8 +49,8 @@ export class RemoteProjectileSimulator {
 
   /**
    * Compute the render poses of all **remote** projectiles (owner ≠ the local
-   * player) at render time `nowMs − interpDelayMs`, by simulating the latest
-   * authoritative snapshot forward instead of lerping it.
+   * player) at render time `nowMs + leadMs` (their true present), by simulating the
+   * latest authoritative snapshot forward instead of lerping it.
    *
    * `snapshots` is the interpolator's own buffer (shared by reference) so this
    * resolves against the exact same render window the remote ships use.
@@ -62,11 +62,11 @@ export class RemoteProjectileSimulator {
   simulate(
     snapshots: readonly BufferedSnapshot[],
     nowMs: number,
-    interpDelayMs: number,
+    leadMs: number,
     localPlayerId: PlayerId,
     extrapolateMaxMs = 0,
   ): Projectile[] {
-    const renderTime = nowMs - interpDelayMs;
+    const renderTime = nowMs + leadMs;
     const pair = pickStraddlingPair(snapshots, renderTime, extrapolateMaxMs);
     if (!pair) return [];
     const { a, b, extrapMs } = pair;
