@@ -160,9 +160,10 @@ const PLAYER_FIELDS: FieldDef<Player>[] = [
   { kind: "f32", get: (p) => p.kinematics.vx, set: (p, v) => (p.kinematics.vx = v as number) },
   { kind: "f32", get: (p) => p.kinematics.vy, set: (p, v) => (p.kinematics.vy = v as number) },
   { kind: "f32", get: (p) => p.kinematics.rotation, set: (p, v) => (p.kinematics.rotation = v as number) },
-  { kind: "f32", get: (p) => p.kinematics.prevX, set: (p, v) => (p.kinematics.prevX = v as number) },
-  { kind: "f32", get: (p) => p.kinematics.prevY, set: (p, v) => (p.kinematics.prevY = v as number) },
-  { kind: "f32", get: (p) => p.kinematics.prevRotation, set: (p, v) => (p.kinematics.prevRotation = v as number) },
+  // prevX/prevY/prevRotation are deliberately NOT on the wire: the client never
+  // reads a snapshot's prev* (the interpolator/simulator bake prev === current,
+  // and the renderer draws view entities at alpha=1). `blankPlayer` defaults them
+  // to 0; transmitting them was 3 redundant f32 per player every snapshot.
   { kind: "f32", get: (p) => p.resources.energy, set: (p, v) => (p.resources.energy = v as number) },
   { kind: "f32", get: (p) => p.resources.recharge, set: (p, v) => (p.resources.recharge = v as number) },
   { kind: "f32", get: (p) => p.resources.maxEnergy, set: (p, v) => (p.resources.maxEnergy = v as number) },
@@ -222,8 +223,9 @@ const PROJ_FIELDS: FieldDef<Projectile>[] = [
   { kind: "f32", get: (p) => p.y, set: (p, v) => (p.y = v as number) },
   { kind: "f32", get: (p) => p.vx, set: (p, v) => (p.vx = v as number) },
   { kind: "f32", get: (p) => p.vy, set: (p, v) => (p.vy = v as number) },
-  { kind: "f32", get: (p) => p.prevX, set: (p, v) => (p.prevX = v as number) },
-  { kind: "f32", get: (p) => p.prevY, set: (p, v) => (p.prevY = v as number) },
+  // prevX/prevY are not sent: the RemoteProjectileSimulator overwrites them with
+  // the simulated pose (prev === current) and the renderer draws at alpha=1, so a
+  // snapshot's projectile prev* is never read. `blankProjectile` defaults them to 0.
   { kind: "varuint", get: (p) => p.life, set: (p, v) => (p.life = v as number) },
   { kind: "varinf", get: (p) => p.bounces, set: (p, v) => (p.bounces = v as number) },
   { kind: "f32", get: (p) => p.radius, set: (p, v) => (p.radius = v as number) },
