@@ -33,8 +33,10 @@ import { loadMapSync } from "./loadMap";
 // Railway (and most PaaS hosts) inject the port to bind via process.env.PORT;
 // fall back to 3000 so `npm run server` keeps working locally with no env set.
 const PORT = parseInt(process.env.PORT ?? "3000", 10);
-/** Broadcast a snapshot every N advance steps: 100 / 3 ≈ 33 Hz. */
-const BROADCAST_EVERY = 3;
+/** Broadcast a snapshot every N advance steps: 100 / 2 = 50 Hz. Higher than the
+ *  old 33Hz to tighten the cadence of newly-fired remote projectiles (~+50%
+ *  downstream, AOI-scoped to on-screen ships). */
+const BROADCAST_EVERY = 2;
 /** Measure each socket's round-trip time this often (ms) via WS ping/pong. */
 const PING_EVERY_MS = 1000;
 

@@ -207,4 +207,67 @@ describe("SnapshotInterpolator (forward dead-reckoning)", () => {
     expect(newer.kinematics.x).toBe(100);
     expect(view.players.get("r")!.kinematics).not.toBe(newer.kinematics);
   });
+
+  // --- error smoothing (projective velocity blending) ------------------------
+
+  it("tracks a constant-velocity remote with no trailing lag", () => {
+    // A remote coasting at vx=2 px/tick (0.2 px/ms). Snapshots arrive every 20ms
+    // (50Hz) carrying its true position; we render each as it arrives with a fixed
+    // 40ms lead. Perfect prediction → the spring has zero error to bleed, so the
+    // eased visual must sit exactly on the dead-reckoned present (40ms = 4 ticks
+    // ahead = +8px), NOT lag behind it the way a naive smoother would.
+    const interp = new SnapshotInterpolator();
+    const vx = 2;
+    const dtMs = 20;
+    const lead = 40;
+    let last = 0;
+    for (let k = 0; k <= 20; k++) {
+      const tNow = 1000 + 20 * k;
+      interp.push(snap(k + 1, [playerAt("r", 4 * k, 0, 0, vx, 0)]), tNow);
+      const view = viewWorld();
+      interp.buildView(view, tNow, lead, LOCAL, 200, dtMs);
+      last = view.players.get("r")!.kinematics.x;
+    }
+    // present = 4*20 (=80) + vx * (lead/10ms = 4 ticks) (=8) = 88.
+    expect(last).toBeCloseTo(88, 1);
+  });
+
+  it("glides through a velocity reversal instead of snapping", () => {
+    // The ship coasts at +2, then reverses to −2 at the same position. With a 100ms
+    // lead the dead-reckon target flips from +20px ahead to −20px ahead — a 40px
+    // discontinuity a raw model would snap in one frame. The smoother must spread it
+    // over several frames: the largest single-frame step stays a small fraction of
+    // that jump (and well under the snap threshold), proving no hard snap.
+    const dtMs = 16;
+    const lead = 100;
+    const reverseAt = 10;
+    const frames = 20;
+
+    function run(smoothed: boolean): number {
+      const interp = new SnapshotInterpolator();
+      let maxStep = 0;
+      let prevX: number | null = null;
+      // True position integrates the velocity (consistent motion); only the velocity
+      // reverses, so the *position* stays continuous and just the lead projection flips.
+      let pos = 500;
+      for (let k = 0; k < frames; k++) {
+        const tNow = 1000 + 16 * k;
+        const vx = k < reverseAt ? 2 : -2;
+        interp.push(snap(k + 1, [playerAt("r", pos, 0, 0, vx, 0)]), tNow);
+        const view = viewWorld();
+        interp.buildView(view, tNow, lead, LOCAL, 200, smoothed ? dtMs : 0);
+        const x = view.players.get("r")!.kinematics.x;
+        if (prevX !== null && k >= reverseAt) maxStep = Math.max(maxStep, Math.abs(x - prevX));
+        prevX = x;
+        pos += vx * (dtMs / 10); // advance by vx px/tick over dtMs (=dtMs/10 ticks)
+      }
+      return maxStep;
+    }
+
+    const rawJump = run(false); // dtMs=0 → snap each frame, full discontinuity
+    const smoothStep = run(true);
+    expect(rawJump).toBeGreaterThan(30); // the raw model really does snap ~40px
+    expect(smoothStep).toBeLessThan(rawJump / 2); // smoothing spreads it out
+    expect(smoothStep).toBeLessThan(64); // and never trips the snap threshold
+  });
 });
