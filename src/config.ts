@@ -216,6 +216,31 @@ export const NET = {
      *  defender is simply favoured by the excess latency (no lag comp, by design).
      *  Kept ≤ `extrapolateMaxMs` so a normal lead is never clipped by the cap. */
     maxMs: 120,
+    /** Half-life (ms) for easing the per-frame lead toward its freshly computed
+     *  target. The raw lead is `ping/2 + remotePing/2 + ½ interval`, recomputed
+     *  every frame, so ping/jitter noise would otherwise pulse the projection
+     *  distance — and thus every remote ship/shot — frame to frame. Easing it
+     *  keeps the timeline steady without lagging real link changes. */
+    smoothHalfLifeMs: 120,
+  },
+
+  /** Remote-ship render smoothing (projective velocity blending). The remotes are
+   *  dead-reckoned to their true present (`now + lead`) for aim/adjudication, but a
+   *  maneuvering ship's extrapolation is wrong by its un-modeled acceleration and
+   *  would hard-snap to truth on every snapshot (~33Hz jitter). Instead the *drawn*
+   *  pose follows the target velocity (no trailing lag while coasting) and springs
+   *  the residual error out over `halfLifeMs`, so a correction glides in rather than
+   *  snapping. A warp/respawn/teleport (error past the snap thresholds) still pops. */
+  smooth: {
+    /** Half-life (ms) to bleed off a remote's position/rotation error. Smaller =
+     *  snappier/more responsive but more visible correction; larger = smoother but
+     *  laggier on hard maneuvers. */
+    halfLifeMs: 80,
+    /** Position error (px) past which we snap instead of spring — a warp/respawn, not
+     *  a maneuver. Keeps "warps pop cleanly" from the present-time model. */
+    snapPx: 64,
+    /** Rotation error (rad) past which we snap the facing instead of springing. */
+    snapRad: Math.PI,
   },
 
   /** Total forward dead-reckoning budget (ms) past the newest snapshot, = the

@@ -70,6 +70,10 @@ async function main() {
   // Net-health telemetry for the overlay + the forward-lead estimate.
   const health = new NetHealth();
   let latestPings: Record<string, number> = {};
+  // Eased forward-lead (ms). The raw lead is recomputed every frame from ping +
+  // measured interval, so it jitters; we ease it (NET.lead.smoothHalfLifeMs) so the
+  // render timeline doesn't pulse the remotes. -1 = "uninitialized" → snap on first use.
+  let smoothedLeadMs = -1;
   // Newest snapshot tick accepted; jitter can deliver snapshots out of order, so an
   // older-tick snapshot is stale and dropped to keep the buffer monotonic.
   let newestSnapTick = -1;
@@ -216,14 +220,19 @@ async function main() {
     // past). Estimate the data's transit age from the link — our + the remote's
     // half-RTT plus ½ a broadcast interval — and clamp. Used everywhere this frame so
     // ships, their shots, and our incoming-shot adjudication stay on one timeline.
-    const halfIntervalMs = (health.meanIntervalMs > 0 ? health.meanIntervalMs : 30) / 2;
+    const halfIntervalMs = (health.meanIntervalMs > 0 ? health.meanIntervalMs : 20) / 2;
     let remotePing = 0;
     for (const id in latestPings) if (id !== localId) remotePing = Math.max(remotePing, latestPings[id]);
     const localPing = latestPings[localId] ?? 0;
-    const leadMs = Math.max(
+    const rawLeadMs = Math.max(
       NET.lead.minMs,
       Math.min(NET.lead.maxMs, localPing / 2 + remotePing / 2 + halfIntervalMs),
     );
+    // Ease the lead toward its raw target so ping/jitter noise doesn't pulse the
+    // projection distance frame to frame (snap on the first frame, which has no prior).
+    const leadBlend = smoothedLeadMs < 0 ? 1 : 1 - Math.pow(2, -(dt * 1000) / NET.lead.smoothHalfLifeMs);
+    smoothedLeadMs = smoothedLeadMs < 0 ? rawLeadMs : smoothedLeadMs + (rawLeadMs - smoothedLeadMs) * leadBlend;
+    const leadMs = smoothedLeadMs;
     // Catch incoming remote shots up to that same present, so the overlap that kills
     // us is the overlap we can see ("what you see is what hits you").
     localSim.setIncomingLeadMs(leadMs);
@@ -285,10 +294,10 @@ async function main() {
       return;
     }
 
-    // (d) Build the view from snapshots (remotes interpolated in the past), then
-    //     overlay our own ship from LocalSim (present, authoritative). Kills/score
-    //     come from the server (serverLocal); everything else from LocalSim.
-    interp.buildView(view, now, leadMs, localId, NET.extrapolateMaxMs);
+    // (d) Build the view from snapshots (remotes dead-reckoned to the present and
+    //     error-smoothed), then overlay our own ship from LocalSim (present,
+    //     authoritative). Kills/score come from the server; everything else LocalSim.
+    interp.buildView(view, now, leadMs, localId, NET.extrapolateMaxMs, dt * 1000);
     if (serverLocal) {
       me.combat.kills = serverLocal.combat.kills;
       me.combat.score = serverLocal.combat.score;

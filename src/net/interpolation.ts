@@ -10,10 +10,15 @@
  * from the newest snapshot. This mirrors Continuum, which simulates remote ships
  * forward by the sender's ping to land at local "now" and keeps coasting them.
  *
- * Normal-case correction is sub-pixel (ships mostly coast; 33Hz leaves only un-
- * modeled accel over ~30ms), so no explicit easing is needed; a warp/respawn pops
- * cleanly (forward projection can't streak). The clamp + freeze on starvation is
- * the only fallback (M2.5).
+ * A maneuvering ship's extrapolation is wrong by its un-modeled acceleration, so a
+ * raw projection would hard-snap to truth on every snapshot (~33Hz jitter). The
+ * *drawn* pose is therefore smoothed with **projective velocity blending**: it
+ * follows the target's velocity (no trailing lag while coasting) and springs the
+ * residual error out over `NET.smooth.halfLifeMs` (a correction glides in instead
+ * of snapping). The dead-reckoned `target` itself is still what projectiles and hit
+ * adjudication use, so aim stays true — only the visible ship pose is eased. A
+ * warp/respawn (error past `NET.smooth.snapPx/snapRad`) still pops cleanly. The
+ * clamp + freeze on starvation is the only other fallback (M2.5).
  *
  * The timeline is built from **client receive-time** (`performance.now()`), not
  * the server tick, so no clock-sync is needed.
@@ -35,7 +40,7 @@
  * `view.projectiles` by main.ts after `buildView`.
  */
 
-import { TICK_DT } from "../config";
+import { NET, TICK_DT } from "../config";
 import type { Kinematics, Player, PlayerId } from "../sim/types";
 import type { World } from "../sim/world";
 import type { Snapshot } from "./snapshot";
@@ -117,14 +122,27 @@ const MAX_BUFFER = 30;
 
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 
-/** Interpolate an angle the short way around the circle, so a ship crossing the
- *  0/2π seam rotates by the small arc instead of spinning all the way back. */
-function lerpAngle(a: number, b: number, t: number): number {
+/** The signed shortest delta from angle `a` to `b`, wrapped to (−π, π], so motion
+ *  across the 0/2π seam takes the small arc instead of spinning the long way. */
+function shortAngle(a: number, b: number): number {
   const twoPi = Math.PI * 2;
   let d = (b - a) % twoPi;
   if (d > Math.PI) d -= twoPi;
   if (d < -Math.PI) d += twoPi;
-  return a + d * t;
+  return d;
+}
+
+/** Interpolate an angle the short way around the circle. */
+function lerpAngle(a: number, b: number, t: number): number {
+  return a + shortAngle(a, b) * t;
+}
+
+/** The eased visual pose of a remote ship, carried between frames so each frame's
+ *  dead-reckoned target can be sprung toward instead of snapped to. */
+interface SmoothedPose {
+  x: number;
+  y: number;
+  rot: number;
 }
 
 export class SnapshotInterpolator {
@@ -132,6 +150,10 @@ export class SnapshotInterpolator {
   /** `receivedAt` of the newest snapshot whose events have already been released.
    *  Events fire once, in interpolated time, when render time passes them. */
   private lastEventTime = -Infinity;
+  /** Per-remote eased render pose (projective velocity blending). Pruned to the
+   *  players present in the newest snapshot each frame so a left/rejoined player
+   *  can't resurrect a stale pose. */
+  private smoothed = new Map<PlayerId, SmoothedPose>();
 
   /** Buffer a freshly received snapshot. `nowMs` is `performance.now()`. */
   push(snap: Snapshot, nowMs: number): void {
@@ -169,6 +191,7 @@ export class SnapshotInterpolator {
     leadMs: number,
     localPlayerId: PlayerId,
     extrapolateMaxMs = 0,
+    dtMs = 0,
   ): void {
     if (this.buffer.length === 0) return;
 
@@ -183,18 +206,28 @@ export class SnapshotInterpolator {
 
     // Convert the dead-reckoning window into sim ticks (velocities are px/tick).
     const extrapTicks = extrapMs / (1000 * TICK_DT);
+    const dtTicks = dtMs / (1000 * TICK_DT);
+    // Spring fraction: bleed off `halfLifeMs` worth of error each `halfLifeMs`.
+    const blend = dtMs > 0 ? 1 - Math.pow(2, -dtMs / NET.smooth.halfLifeMs) : 1;
 
     // --- players -------------------------------------------------------------
     const olderPlayers = new Map(a.snap.players.map((p) => [p.id, p]));
     view.players.clear();
+    const seen = new Set<PlayerId>();
     for (const bp of b.snap.players) {
       if (bp.id === localPlayerId) continue; // local handled below, from newest
-      view.players.set(bp.id, interpolatePlayer(olderPlayers.get(bp.id), bp, t, extrapTicks));
+      seen.add(bp.id);
+      // Dead-reckoned present pose (the basis for projectiles + adjudication).
+      const target = interpolatePlayer(olderPlayers.get(bp.id), bp, t, extrapTicks);
+      view.players.set(bp.id, this.smoothPlayer(target, bp, dtTicks, blend));
     }
     // The local player is NOT interpolated — pin it to the latest snapshot;
     // main.ts then overlays the authoritative `LocalSim` pose (relay model).
     const localNewest = newest.snap.players.find((p) => p.id === localPlayerId);
     if (localNewest) view.players.set(localNewest.id, pinPlayer(localNewest));
+
+    // Forget eased poses for remotes no longer present, so a rejoin starts fresh.
+    for (const id of this.smoothed.keys()) if (!seen.has(id)) this.smoothed.delete(id);
 
     // --- projectiles ---------------------------------------------------------
     // Intentionally empty (M2.8). Projectiles are no longer interpolated here:
@@ -215,6 +248,41 @@ export class SnapshotInterpolator {
         this.lastEventTime = buf.receivedAt;
       }
     }
+  }
+
+  /** Ease the drawn pose of a remote toward its dead-reckoned `target` (projective
+   *  velocity blending): carry last frame's visual pose forward at the target's
+   *  velocity (so a coasting ship has zero steady-state lag), then spring the
+   *  residual error out by `blend`. A new/respawning/warped remote snaps to the
+   *  target instead — keeping joins, respawns and teleports crisp. `newest` is the
+   *  raw snapshot player (for velocity + respawn state); `target` is its present
+   *  pose. Mutates `this.smoothed` and returns a fresh view player. */
+  private smoothPlayer(target: Player, newest: Player, dtTicks: number, blend: number): Player {
+    const tk = target.kinematics;
+    const prev = this.smoothed.get(newest.id);
+
+    let vis: SmoothedPose;
+    const posErrSq = prev ? (tk.x - prev.x) ** 2 + (tk.y - prev.y) ** 2 : 0;
+    const rotErr = prev ? Math.abs(shortAngle(prev.rot, tk.rotation)) : 0;
+    if (
+      !prev ||
+      newest.combat.respawnAt !== 0 || // dead/respawning — its old pose is irrelevant
+      posErrSq > NET.smooth.snapPx ** 2 || // a warp, not a maneuver
+      rotErr > NET.smooth.snapRad
+    ) {
+      vis = { x: tk.x, y: tk.y, rot: tk.rotation };
+    } else {
+      const nk = newest.kinematics;
+      const x = prev.x + nk.vx * dtTicks;
+      const y = prev.y + nk.vy * dtTicks;
+      vis = {
+        x: x + (tk.x - x) * blend,
+        y: y + (tk.y - y) * blend,
+        rot: prev.rot + shortAngle(prev.rot, tk.rotation) * blend,
+      };
+    }
+    this.smoothed.set(newest.id, vis);
+    return { ...target, kinematics: bakedKinematics(tk, vis.x, vis.y, vis.rot) };
   }
 }
 
