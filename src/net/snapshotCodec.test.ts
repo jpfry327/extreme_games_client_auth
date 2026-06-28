@@ -90,6 +90,29 @@ describe("snapshot codec — keyframe round-trip", () => {
     expect(decoded.players.length).toBeGreaterThan(0);
   });
 
+  it("does not transmit prev* — they decode to 0, never sourced from the wire", () => {
+    // prevX/prevY/prevRotation are off the schema: the client always bakes
+    // prev === current itself (interpolator/simulator), so the wire need not carry
+    // them. Prove it by feeding a snapshot whose entities have a *non-zero* prior
+    // pose and confirming the decode drops it to the blank default (0).
+    const snap = snapshotSequence(11, 60).at(-1)!;
+    const movedPlayer = snap.players.find(
+      (p) => p.kinematics.prevX !== 0 || p.kinematics.prevY !== 0 || p.kinematics.prevRotation !== 0,
+    );
+    expect(movedPlayer).toBeDefined(); // a stepped world has a real prior pose
+
+    const decoded = decodeKeyframe(snap);
+    for (const p of decoded.players) {
+      expect(p.kinematics.prevX).toBe(0);
+      expect(p.kinematics.prevY).toBe(0);
+      expect(p.kinematics.prevRotation).toBe(0);
+    }
+    for (const p of decoded.projectiles) {
+      expect(p.prevX).toBe(0);
+      expect(p.prevY).toBe(0);
+    }
+  });
+
   it("carries every event type and pings verbatim", () => {
     // Hand-build a snapshot exercising all four GameEvent variants (a real
     // broadcast rarely carries every one at once) plus a null killer and pings.
