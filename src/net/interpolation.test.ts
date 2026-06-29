@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { WARBIRD } from "../config";
+import { NET, WARBIRD } from "../config";
 import { GameMap } from "../sim/gamemap";
 import { createPlayer } from "../sim/player";
 import type { GameEvent, Player, Projectile } from "../sim/types";
@@ -208,14 +208,14 @@ describe("SnapshotInterpolator (forward dead-reckoning)", () => {
     expect(view.players.get("r")!.kinematics).not.toBe(newer.kinematics);
   });
 
-  // --- error smoothing (projective velocity blending) ------------------------
+  // --- render smoothing (nullspace-faithful snap-or-blend) -------------------
 
   it("tracks a constant-velocity remote with no trailing lag", () => {
     // A remote coasting at vx=2 px/tick (0.2 px/ms). Snapshots arrive every 20ms
     // (50Hz) carrying its true position; we render each as it arrives with a fixed
-    // 40ms lead. Perfect prediction → the spring has zero error to bleed, so the
-    // eased visual must sit exactly on the dead-reckoned present (40ms = 4 ticks
-    // ahead = +8px), NOT lag behind it the way a naive smoother would.
+    // 40ms lead. Perfect prediction → zero error to reconcile, so the drawn visual
+    // must sit exactly on the dead-reckoned present (40ms = 4 ticks ahead = +8px),
+    // NOT lag behind it the way a per-frame spring would.
     const interp = new SnapshotInterpolator();
     const vx = 2;
     const dtMs = 20;
@@ -232,42 +232,48 @@ describe("SnapshotInterpolator (forward dead-reckoning)", () => {
     expect(last).toBeCloseTo(88, 1);
   });
 
-  it("glides through a velocity reversal instead of snapping", () => {
-    // The ship coasts at +2, then reverses to −2 at the same position. With a 100ms
-    // lead the dead-reckon target flips from +20px ahead to −20px ahead — a 40px
-    // discontinuity a raw model would snap in one frame. The smoother must spread it
-    // over several frames: the largest single-frame step stays a small fraction of
-    // that jump (and well under the snap threshold), proving no hard snap.
-    const dtMs = 16;
-    const lead = 100;
-    const reverseAt = 10;
-    const frames = 20;
+  it("snaps the drawn pose to truth in one frame on a jump past snapPx", () => {
+    // A warp/respawn or a hard maneuver whose extrapolation diverged: the drawn pose
+    // must pop straight to the new present rather than glide across the gap, so the
+    // ship stays where its bullets are computed from. (nullspace's own threshold is
+    // 4 tiles ≈ 64px; we snap tighter for coupling — see NET.smooth.snapPx.)
+    const interp = new SnapshotInterpolator();
+    interp.push(snap(1, [playerAt("r", 100, 0)]), 1000);
+    let view = viewWorld();
+    interp.buildView(view, 1000, 0, LOCAL, 200, 16); // fresh remote snaps to 100
+    expect(view.players.get("r")!.kinematics.x).toBeCloseTo(100);
 
-    function run(smoothed: boolean): number {
-      const interp = new SnapshotInterpolator();
-      let maxStep = 0;
-      let prevX: number | null = null;
-      // True position integrates the velocity (consistent motion); only the velocity
-      // reverses, so the *position* stays continuous and just the lead projection flips.
-      let pos = 500;
-      for (let k = 0; k < frames; k++) {
-        const tNow = 1000 + 16 * k;
-        const vx = k < reverseAt ? 2 : -2;
-        interp.push(snap(k + 1, [playerAt("r", pos, 0, 0, vx, 0)]), tNow);
-        const view = viewWorld();
-        interp.buildView(view, tNow, lead, LOCAL, 200, smoothed ? dtMs : 0);
-        const x = view.players.get("r")!.kinematics.x;
-        if (prevX !== null && k >= reverseAt) maxStep = Math.max(maxStep, Math.abs(x - prevX));
-        prevX = x;
-        pos += vx * (dtMs / 10); // advance by vx px/tick over dtMs (=dtMs/10 ticks)
-      }
-      return maxStep;
-    }
+    const jump = 100 + NET.smooth.snapPx + 200; // far past the snap threshold
+    interp.push(snap(2, [playerAt("r", jump, 0)]), 1020);
+    view = viewWorld();
+    interp.buildView(view, 1020, 0, LOCAL, 200, 20);
+    expect(view.players.get("r")!.kinematics.x).toBeCloseTo(jump);
+  });
 
-    const rawJump = run(false); // dtMs=0 → snap each frame, full discontinuity
-    const smoothStep = run(true);
-    expect(rawJump).toBeGreaterThan(30); // the raw model really does snap ~40px
-    expect(smoothStep).toBeLessThan(rawJump / 2); // smoothing spreads it out
-    expect(smoothStep).toBeLessThan(64); // and never trips the snap threshold
+  it("blends a small (< snapPx) prediction error in over blendTimeMs, not instantly", () => {
+    // The ship is a few px off where its reported velocity predicted — a maneuver, not
+    // a warp. The drawn pose must hold near the prediction and bleed the residual in
+    // linearly over the blend window, never snapping mid-maneuver.
+    const interp = new SnapshotInterpolator();
+    interp.push(snap(1, [playerAt("r", 100, 0, 0, 4, 0)]), 1000);
+    let view = viewWorld();
+    interp.buildView(view, 1000, 0, LOCAL, 200, 16); // snaps to 100
+
+    const err = 5; // vx=4 over 2 ticks predicts 108; the ship actually reached 113
+    expect(err).toBeLessThan(NET.smooth.snapPx);
+    interp.push(snap(2, [playerAt("r", 108 + err, 0, 0, 4, 0)]), 1020);
+    view = viewWorld();
+    interp.buildView(view, 1020, 0, LOCAL, 200, 20);
+    const drawnNow = view.players.get("r")!.kinematics.x;
+    expect(drawnNow).toBeCloseTo(108, 3); // held at the projection, not snapped to 113
+    expect(Math.abs(drawnNow - 113)).toBeCloseTo(err, 3);
+
+    // A full blend window later, the residual is gone — drawn meets the dead-reckoned
+    // truth (no new snapshot, so it coasts on velocity + the bled correction).
+    const later = 1020 + NET.smooth.blendTimeMs;
+    view = viewWorld();
+    interp.buildView(view, later, 0, LOCAL, 100_000, NET.smooth.blendTimeMs);
+    const truthX = 108 + err + 4 * ((later - 1020) / (1000 * 0.01)); // newest + vx*ageTicks
+    expect(view.players.get("r")!.kinematics.x).toBeCloseTo(truthX, 2);
   });
 });

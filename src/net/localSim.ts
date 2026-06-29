@@ -29,11 +29,12 @@
  * screen to match, and the small residual keeps it favouring itself).
  */
 
-import { createPlayer } from "../sim/player";
+import { createPlayer, isAlive } from "../sim/player";
 import type { GameMap } from "../sim/gamemap";
 import type { InputCommand, Player, PlayerId, Projectile } from "../sim/types";
 import { World } from "../sim/world";
 import { stepProjectile } from "../sim/systems/projectiles";
+import { overlaps } from "../sim/systems/collision";
 import { TICK_DT, type ShipType } from "../config";
 
 /** Cheap structural clone of an incoming projectile so injecting it into our world
@@ -129,12 +130,32 @@ export class LocalSim {
       // draws it at so its logical pose matches its drawn pose. A shot that hits a
       // wall mid-catch-up arrives already dead — still pushed, so the damage step
       // detonates its (wall) blast exactly as it would for a live one.
+      //
+      // `stepProjectile` flies + bounces but never tests ship overlap, so we sweep the
+      // collision test per tick and stop the catch-up at the first pose that overlaps a
+      // defended ship — otherwise a point-blank shot fast-forwards clean *through* us
+      // and is never adjudicated (the "I die on their screen but not mine" bug). Left
+      // parked at the overlap, the next `step` flies it the rest of a tick (well inside
+      // the ~32px hit zone at 4.1px/tick) and the collision step registers the hit.
       const proj = cloneProjectile(p);
       for (let i = 0; i < this.incomingLeadTicks && proj.alive; i++) {
+        if (this.overlapsDefended(proj)) break; // would hit us here — let `step` adjudicate it
         stepProjectile(proj, this.world.map);
       }
       this.world.projectiles.push(proj);
     }
+  }
+
+  /** Whether `proj` overlaps any owned ship we'd adjudicate a hit against — the same
+   *  test `collisionSystem` runs, used to stop the inject catch-up before a shot flies
+   *  through us. Mirrors the system's guards (defended + alive; the firer can't be a
+   *  defended target since its own shots are never injected). */
+  private overlapsDefended(proj: Projectile): boolean {
+    for (const id of this.defended) {
+      const target = this.world.players.get(id);
+      if (target && isAlive(target) && overlaps(proj, target)) return true;
+    }
+    return false;
   }
 
   /** Drop already-injected incoming shots that have vanished from the latest report,

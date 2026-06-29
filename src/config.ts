@@ -224,23 +224,31 @@ export const NET = {
     smoothHalfLifeMs: 120,
   },
 
-  /** Remote-ship render smoothing (projective velocity blending). The remotes are
-   *  dead-reckoned to their true present (`now + lead`) for aim/adjudication, but a
-   *  maneuvering ship's extrapolation is wrong by its un-modeled acceleration and
-   *  would hard-snap to truth on every snapshot (~33Hz jitter). Instead the *drawn*
-   *  pose follows the target velocity (no trailing lag while coasting) and springs
-   *  the residual error out over `halfLifeMs`, so a correction glides in rather than
-   *  snapping. A warp/respawn/teleport (error past the snap thresholds) still pops. */
+  /** Remote-ship render smoothing (nullspace-faithful snap-or-blend). The remotes are
+   *  dead-reckoned to their true present (`now + lead`) for aim/adjudication; the
+   *  *drawn* ship is kept **at that truth** so it equals the origin its bullets/bombs
+   *  fly from (a continuously-springed ship lagged its own shots — they detached and
+   *  led the nose). Each frame the drawn pose dead-reckons by the remote's velocity;
+   *  on each freshly arrived snapshot we reconcile it against the new authoritative
+   *  present: a large prediction error (`> snapPx`, a warp/respawn/hard maneuver)
+   *  **snaps** to truth, while a small residual is **blended** in linearly over
+   *  `blendTimeMs` (nullspace's `lerp_velocity`). Facing is never smoothed — it's
+   *  taken straight from the target so the nose matches the heading bullets fire on.
+   *  Because the pose only corrects at snapshot boundaries (not every frame), no
+   *  steady-state lag accumulates while coasting or maneuvering. */
   smooth: {
-    /** Half-life (ms) to bleed off a remote's position/rotation error. Smaller =
-     *  snappier/more responsive but more visible correction; larger = smoother but
-     *  laggier on hard maneuvers. */
-    halfLifeMs: 80,
-    /** Position error (px) past which we snap instead of spring — a warp/respawn, not
-     *  a maneuver. Keeps "warps pop cleanly" from the present-time model. */
-    snapPx: 64,
-    /** Rotation error (rad) past which we snap the facing instead of springing. */
-    snapRad: Math.PI,
+    /** Window (ms) over which a small (sub-`snapPx`) prediction error is bled into the
+     *  drawn pose as a constant correction velocity — nullspace uses a fixed 200ms.
+     *  Smaller = snappier/tighter tracking of truth (bullets stay glued to the nose)
+     *  but more visible micro-corrections; larger = smoother but slightly laggier. */
+    blendTimeMs: 200,
+    /** Position error (px) past which we snap to truth instead of blending — a
+     *  warp/respawn or a hard maneuver whose extrapolation diverged. nullspace's own
+     *  threshold is `4.0` in *tile* units (it stores position as packet_px/16), i.e.
+     *  ~64px; we snap tighter so the drawn ship hugs the position its shots are
+     *  computed from (the bullets-ahead-of-the-nose fix). Only small maneuver residuals
+     *  blend; bump toward 64 for smoother-but-looser, more literally-nullspace tracking. */
+    snapPx: 8,
   },
 
   /** Total forward dead-reckoning budget (ms) past the newest snapshot, = the

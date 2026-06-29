@@ -110,6 +110,26 @@ describe("LocalSim — defender authority", () => {
     expect(isAlive(me)).toBe(true);
   });
 
+  it("sweeps collisions during the inject catch-up so a point-blank shot can't tunnel through", () => {
+    // Regression: `stepProjectile` flies + bounces but never tests ship overlap, so a
+    // point-blank shot used to fast-forward clean *through* the owned ship during the
+    // catch-up loop and never register — "I die on their screen but not on mine". The
+    // sweep stops the catch-up at the first pose that overlaps us so the hit lands.
+    const sim = new LocalSim(openMap(), ["me"]);
+    const me = sim.addOwned("me", "Me", 0, WARBIRD, 500, 500);
+    me.resources.energy = 5; // one bullet is fatal
+
+    const speed = shipConfig(WARBIRD).bullet.speed; // 4.1 px/tick
+    sim.setIncomingLeadMs(80); // 8 ticks ≈ 33px catch-up — would clear our ~16px hit zone
+    // Reported sitting on us, flying through. Without the sweep the catch-up steps it
+    // well past before the first adjudicating step; with it, the shot stops on us.
+    sim.injectIncoming([{ ...bulletAt("enemy", 1, 500, 500), vx: speed, life: 50 }]);
+    sim.step(new Map());
+
+    expect(sim.world.events.some((e) => e.type === "shipHit" && e.target === "me")).toBe(true);
+    expect(me.combat.respawnAt).toBeGreaterThan(0); // dead on our own screen
+  });
+
   it("retracts an injected shot that vanished from the latest report (no ghost bullet)", () => {
     const sim = new LocalSim(openMap(), ["me"]);
     const me = sim.addOwned("me", "Me", 0, WARBIRD, 500, 500);

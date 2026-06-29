@@ -11,14 +11,20 @@
  * forward by the sender's ping to land at local "now" and keeps coasting them.
  *
  * A maneuvering ship's extrapolation is wrong by its un-modeled acceleration, so a
- * raw projection would hard-snap to truth on every snapshot (~33Hz jitter). The
- * *drawn* pose is therefore smoothed with **projective velocity blending**: it
- * follows the target's velocity (no trailing lag while coasting) and springs the
- * residual error out over `NET.smooth.halfLifeMs` (a correction glides in instead
- * of snapping). The dead-reckoned `target` itself is still what projectiles and hit
- * adjudication use, so aim stays true — only the visible ship pose is eased. A
- * warp/respawn (error past `NET.smooth.snapPx/snapRad`) still pops cleanly. The
- * clamp + freeze on starvation is the only other fallback (M2.5).
+ * raw projection would jitter to truth on every snapshot. The *drawn* pose is
+ * therefore reconciled with **nullspace-faithful snap-or-blend**: each frame it
+ * dead-reckons by the remote's velocity (so it tracks the same projection as
+ * `target`), and on each freshly arrived snapshot it reconciles against the new
+ * authoritative present — a large prediction error (`> NET.smooth.snapPx`, a
+ * warp/respawn/hard maneuver) **snaps**, while a small residual is **blended** in
+ * linearly over `NET.smooth.blendTimeMs`. Because corrections happen only at snapshot
+ * boundaries (not as a per-frame spring), the drawn ship stays *at* its dead-reckoned
+ * truth with no steady-state lag — so it equals the origin its bullets fire from
+ * (a springed pose lagged its own shots, detaching them ahead of the nose). Facing is
+ * NOT smoothed — it's taken straight from the target so the drawn nose tracks the
+ * heading bullets are fired on. The dead-reckoned `target` itself is still what
+ * projectiles and hit adjudication use, so aim stays true. The clamp + freeze on
+ * starvation is the only other fallback (M2.5).
  *
  * The timeline is built from **client receive-time** (`performance.now()`), not
  * the server tick, so no clock-sync is needed.
@@ -137,12 +143,21 @@ function lerpAngle(a: number, b: number, t: number): number {
   return a + shortAngle(a, b) * t;
 }
 
-/** The eased visual pose of a remote ship, carried between frames so each frame's
- *  dead-reckoned target can be sprung toward instead of snapped to. */
-interface SmoothedPose {
+/** The drawn render state of a remote ship, carried between frames. Each frame the
+ *  position dead-reckons by the remote's velocity; on a freshly arrived snapshot the
+ *  prediction error is either snapped or bled in over `blendTimeMs` as a constant
+ *  `corrV*` correction velocity (nullspace's `lerp_velocity` / `lerp_time`). */
+interface SmoothedState {
   x: number;
   y: number;
-  rot: number;
+  /** Residual correction velocity (px/tick), applied for `corrTicksLeft` more ticks. */
+  corrVx: number;
+  corrVy: number;
+  /** Ticks of correction remaining (nullspace `lerp_time`, counted in sim ticks). */
+  corrTicksLeft: number;
+  /** Snapshot tick last reconciled against — detects a freshly arrived snapshot so we
+   *  correct once per snapshot (at the boundary) rather than every render frame. */
+  lastTick: number;
 }
 
 export class SnapshotInterpolator {
@@ -150,10 +165,10 @@ export class SnapshotInterpolator {
   /** `receivedAt` of the newest snapshot whose events have already been released.
    *  Events fire once, in interpolated time, when render time passes them. */
   private lastEventTime = -Infinity;
-  /** Per-remote eased render pose (projective velocity blending). Pruned to the
-   *  players present in the newest snapshot each frame so a left/rejoined player
-   *  can't resurrect a stale pose. */
-  private smoothed = new Map<PlayerId, SmoothedPose>();
+  /** Per-remote drawn render state (snap-or-blend). Pruned to the players present in
+   *  the newest snapshot each frame so a left/rejoined player can't resurrect a stale
+   *  pose. */
+  private smoothed = new Map<PlayerId, SmoothedState>();
 
   /** Buffer a freshly received snapshot. `nowMs` is `performance.now()`. */
   push(snap: Snapshot, nowMs: number): void {
@@ -207,8 +222,6 @@ export class SnapshotInterpolator {
     // Convert the dead-reckoning window into sim ticks (velocities are px/tick).
     const extrapTicks = extrapMs / (1000 * TICK_DT);
     const dtTicks = dtMs / (1000 * TICK_DT);
-    // Spring fraction: bleed off `halfLifeMs` worth of error each `halfLifeMs`.
-    const blend = dtMs > 0 ? 1 - Math.pow(2, -dtMs / NET.smooth.halfLifeMs) : 1;
 
     // --- players -------------------------------------------------------------
     const olderPlayers = new Map(a.snap.players.map((p) => [p.id, p]));
@@ -217,9 +230,10 @@ export class SnapshotInterpolator {
     for (const bp of b.snap.players) {
       if (bp.id === localPlayerId) continue; // local handled below, from newest
       seen.add(bp.id);
-      // Dead-reckoned present pose (the basis for projectiles + adjudication).
+      // Dead-reckoned present pose (the basis for projectiles + adjudication). `target`
+      // is derived from the `b` snapshot, so its tick is the boundary we reconcile at.
       const target = interpolatePlayer(olderPlayers.get(bp.id), bp, t, extrapTicks);
-      view.players.set(bp.id, this.smoothPlayer(target, bp, dtTicks, blend));
+      view.players.set(bp.id, this.smoothPlayer(target, bp, dtTicks, b.snap.tick));
     }
     // The local player is NOT interpolated — pin it to the latest snapshot;
     // main.ts then overlays the authoritative `LocalSim` pose (relay model).
@@ -250,39 +264,64 @@ export class SnapshotInterpolator {
     }
   }
 
-  /** Ease the drawn pose of a remote toward its dead-reckoned `target` (projective
-   *  velocity blending): carry last frame's visual pose forward at the target's
-   *  velocity (so a coasting ship has zero steady-state lag), then spring the
-   *  residual error out by `blend`. A new/respawning/warped remote snaps to the
-   *  target instead — keeping joins, respawns and teleports crisp. `newest` is the
-   *  raw snapshot player (for velocity + respawn state); `target` is its present
-   *  pose. Mutates `this.smoothed` and returns a fresh view player. */
-  private smoothPlayer(target: Player, newest: Player, dtTicks: number, blend: number): Player {
+  /** Reconcile the drawn pose of a remote with its dead-reckoned `target`
+   *  (nullspace-faithful snap-or-blend). Each frame the drawn position dead-reckons by
+   *  the remote's velocity — the same projection `target` advances by — plus any
+   *  active residual correction. On a *freshly arrived* snapshot (`snapTick` changed)
+   *  it reconciles against the new present: a large prediction error snaps to truth, a
+   *  small one is bled in linearly over `blendTimeMs`. A new/respawning remote snaps,
+   *  keeping joins/respawns crisp. Facing is taken straight from the target (never
+   *  smoothed) so the drawn nose matches the heading bullets fire on. `newest` is the
+   *  raw snapshot player (velocity + respawn state); `target` is its present pose.
+   *  Mutates `this.smoothed` and returns a fresh view player. */
+  private smoothPlayer(target: Player, newest: Player, dtTicks: number, snapTick: number): Player {
     const tk = target.kinematics;
-    const prev = this.smoothed.get(newest.id);
+    const nk = newest.kinematics;
+    let st = this.smoothed.get(newest.id);
 
-    let vis: SmoothedPose;
-    const posErrSq = prev ? (tk.x - prev.x) ** 2 + (tk.y - prev.y) ** 2 : 0;
-    const rotErr = prev ? Math.abs(shortAngle(prev.rot, tk.rotation)) : 0;
-    if (
-      !prev ||
-      newest.combat.respawnAt !== 0 || // dead/respawning — its old pose is irrelevant
-      posErrSq > NET.smooth.snapPx ** 2 || // a warp, not a maneuver
-      rotErr > NET.smooth.snapRad
-    ) {
-      vis = { x: tk.x, y: tk.y, rot: tk.rotation };
-    } else {
-      const nk = newest.kinematics;
-      const x = prev.x + nk.vx * dtTicks;
-      const y = prev.y + nk.vy * dtTicks;
-      vis = {
-        x: x + (tk.x - x) * blend,
-        y: y + (tk.y - y) * blend,
-        rot: prev.rot + shortAngle(prev.rot, tk.rotation) * blend,
-      };
+    // New remote, or dead/respawning (its old drawn pose is the death site): snap to
+    // the dead-reckoned truth and start fresh.
+    if (!st || newest.combat.respawnAt !== 0) {
+      st = { x: tk.x, y: tk.y, corrVx: 0, corrVy: 0, corrTicksLeft: 0, lastTick: snapTick };
+      this.smoothed.set(newest.id, st);
+      return { ...target, kinematics: bakedKinematics(tk, st.x, st.y, tk.rotation) };
     }
-    this.smoothed.set(newest.id, vis);
-    return { ...target, kinematics: bakedKinematics(tk, vis.x, vis.y, vis.rot) };
+
+    // (1) Dead-reckon the drawn pose by the remote's velocity (matching how `target`
+    //     advances frame to frame), then apply any residual correction still in flight.
+    st.x += nk.vx * dtTicks;
+    st.y += nk.vy * dtTicks;
+    if (st.corrTicksLeft > 0) {
+      const used = Math.min(dtTicks, st.corrTicksLeft);
+      st.x += st.corrVx * used;
+      st.y += st.corrVy * used;
+      st.corrTicksLeft -= used;
+    }
+
+    // (2) On a freshly arrived snapshot, reconcile against the new authoritative
+    //     present: snap a large prediction error (a warp/respawn/hard maneuver), else
+    //     bleed the small residual in over `blendTimeMs` as a constant correction
+    //     velocity. Between snapshots the pose just coasts (step 1) — no per-frame
+    //     spring, so it stays at truth with no steady-state lag.
+    if (snapTick !== st.lastTick) {
+      st.lastTick = snapTick;
+      const errX = tk.x - st.x;
+      const errY = tk.y - st.y;
+      if (errX * errX + errY * errY > NET.smooth.snapPx ** 2) {
+        st.x = tk.x;
+        st.y = tk.y;
+        st.corrVx = 0;
+        st.corrVy = 0;
+        st.corrTicksLeft = 0;
+      } else {
+        const corrTicks = NET.smooth.blendTimeMs / (1000 * TICK_DT);
+        st.corrVx = errX / corrTicks;
+        st.corrVy = errY / corrTicks;
+        st.corrTicksLeft = corrTicks;
+      }
+    }
+
+    return { ...target, kinematics: bakedKinematics(tk, st.x, st.y, tk.rotation) };
   }
 }
 

@@ -217,22 +217,27 @@ async function main() {
 
     // Forward dead-reckoning lead: project remotes to their *true present* so we aim
     // at where they really are (Subspace dead-reckons remotes to now, not into the
-    // past). Estimate the data's transit age from the link — our + the remote's
-    // half-RTT plus ½ a broadcast interval — and clamp. Used everywhere this frame so
-    // ships, their shots, and our incoming-shot adjudication stay on one timeline.
-    const halfIntervalMs = (health.meanIntervalMs > 0 ? health.meanIntervalMs : 20) / 2;
+    // past). The lead is the pure *transit* age — our + the remote's half-RTT. The
+    // remaining "how long ago did this snapshot land" is NOT guessed at a fixed ½
+    // interval here: the ship/projectile projection already advances from each
+    // snapshot's own `receivedAt` by the true elapsed `now - receivedAt`, so the
+    // broadcast pacing is measured rather than estimated (the fixed ½-interval term
+    // double-counted it and left a gap between the nose and the bullet stream). Used
+    // everywhere this frame so ships, their shots, and our incoming-shot adjudication
+    // stay on one timeline.
     let remotePing = 0;
     for (const id in latestPings) if (id !== localId) remotePing = Math.max(remotePing, latestPings[id]);
     const localPing = latestPings[localId] ?? 0;
     const rawLeadMs = Math.max(
       NET.lead.minMs,
-      Math.min(NET.lead.maxMs, localPing / 2 + remotePing / 2 + halfIntervalMs),
+      Math.min(NET.lead.maxMs, localPing / 2 + remotePing / 2),
     );
     // Ease the lead toward its raw target so ping/jitter noise doesn't pulse the
     // projection distance frame to frame (snap on the first frame, which has no prior).
     const leadBlend = smoothedLeadMs < 0 ? 1 : 1 - Math.pow(2, -(dt * 1000) / NET.lead.smoothHalfLifeMs);
     smoothedLeadMs = smoothedLeadMs < 0 ? rawLeadMs : smoothedLeadMs + (rawLeadMs - smoothedLeadMs) * leadBlend;
     const leadMs = smoothedLeadMs;
+    (window as unknown as Record<string, unknown>).__net = { leadMs, rawLeadMs, localPing, remotePing, maxMs: NET.lead.maxMs };
     // Catch incoming remote shots up to that same present, so the overlap that kills
     // us is the overlap we can see ("what you see is what hits you").
     localSim.setIncomingLeadMs(leadMs);

@@ -50,8 +50,10 @@ export function collisionSystem(world: World): void {
   }
 }
 
-/** Circle overlap between a projectile and a target at its present pose. */
-function overlaps(p: Projectile, target: Player): boolean {
+/** Circle overlap between a projectile and a target at its present pose. Exported so
+ *  the incoming-shot catch-up (`LocalSim.injectIncoming`) can sweep the same test
+ *  per tick and stop a shot before it fast-forwards clean through a defended ship. */
+export function overlaps(p: Projectile, target: Player): boolean {
   const k = target.kinematics;
   const reach = p.radius + shipConfig(target.shipType).radius;
   const dx = p.x - k.x;
