@@ -53,6 +53,16 @@ export class World {
    *  has no meaning; it's a client convenience that rides along on the world. */
   readonly localPlayerId: PlayerId = LOCAL_PLAYER_ID;
 
+  /**
+   * Networked mode's authority seam (netcode §2.2). When `null` (single-player /
+   * bot / tests), the full pipeline runs for *every* player — M1 behaviour,
+   * unchanged. When set to a player id, the input/authority systems (movement,
+   * firing, damage, death) act **only** on that player; every other player is a
+   * remote whose state is driven purely by `net/remotePlayers`, never simulated
+   * from input. The client sets this to `localPlayerId` when it connects.
+   */
+  authoritativePlayerId: PlayerId | null = null;
+
   constructor(
     public readonly map: GameMap,
     seed = 1,
@@ -64,6 +74,13 @@ export class World {
   /** Convenience accessor for the client's own player. */
   get localPlayer(): Player {
     return this.players.get(this.localPlayerId)!;
+  }
+
+  /** Whether the input/authority systems should act on this player this tick.
+   *  True for everyone in single-player mode (`authoritativePlayerId === null`);
+   *  in networked mode, true only for the one authoritative (local) player. */
+  isAuthority(id: PlayerId): boolean {
+    return this.authoritativePlayerId === null || id === this.authoritativePlayerId;
   }
 
   /** Add a player at a fresh spawn point and return it. This is the one path

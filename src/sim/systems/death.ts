@@ -18,6 +18,7 @@ import type { World } from "../world";
  */
 export function deathSystem(world: World): void {
   for (const victim of world.players.values()) {
+    if (!world.isAuthority(victim.id)) continue; // only my own client declares my death (netcode §2.2)
     if (!isAlive(victim)) continue; // already dead and counting down
     if (victim.resources.energy > 0) continue;
 

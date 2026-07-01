@@ -1,15 +1,17 @@
-import { TICK_HZ, WARBIRD } from "./config";
+import { TICK_HZ } from "./config";
 import { Keyboard } from "./input/keyboard";
 import { keyboardLockSupported, toggleFullscreen } from "./input/fullscreen";
 import { loadMap } from "./map/loader";
-import { computeBotInput } from "./sim/bot";
 import { FixedLoop } from "./sim/loop";
 import { isAlive } from "./sim/player";
 import { World } from "./sim/world";
+import { Session } from "./net/session";
+import { WebSocketTransport } from "./net/transport";
 import { Renderer } from "./render/renderer";
 
-/** The M1 combat bot's player id — a second player driven by AI, not a keyboard. */
-const BOT_ID = "bot";
+/** Where the Node relay listens (see server/relay.ts). Reuses the page host so
+ *  the build works over LAN as well as localhost. */
+const RELAY_URL = `ws://${location.hostname || "localhost"}:8080`;
 
 async function main() {
   const mount = document.getElementById("app")!;
@@ -19,8 +21,18 @@ async function main() {
   // 1. Load the map, 2. build the (pure) world, 3. set up the fixed-step loop.
   const map = await loadMap();
   const world = new World(map);
-  world.localPlayer.name = "fecundity"; // (client identity; the network sets this in M2)
-  world.addPlayer(BOT_ID, "Roaming Bot", 1, WARBIRD); // the thing to fight (M1)
+  world.localPlayer.name = "fecundity"; // (client identity; distinct per browser)
+
+  // M2 networked mode: this client owns exactly one ship (the local player).
+  // The seam tells the sim to run the input/authority systems for only that
+  // ship; every other player is a remote played back from the wire (netcode §2).
+  world.authoritativePlayerId = world.localPlayerId;
+
+  // 4b. Connect to the relay. Remote ships appear/update via the Session; the
+  //     renderer already iterates world.players, so no renderer change is needed.
+  const transport = new WebSocketTransport(RELAY_URL);
+  const session = new Session(transport, world);
+
   const loop = new FixedLoop(world);
 
   // 4. Input + renderer.
@@ -57,18 +69,15 @@ async function main() {
     const dt = (now - last) / 1000;
     last = now;
 
-    // Sample this frame's intent for both players: the human from the keyboard,
-    // the bot from its AI. The sim is multiplayer-shaped — it steps from a map
-    // of per-player inputs and doesn't care which came from a keyboard.
+    // Sample this frame's intent for the local ship only — remote players are
+    // played back from the wire, never stepped from input on this client.
     const input = keyboard.sample();
-    const botInput = computeBotInput(world, BOT_ID);
-    const ctx = {
-      inputs: new Map([
-        [world.localPlayerId, input],
-        [BOT_ID, botInput],
-      ]),
-    };
+    const ctx = { inputs: new Map([[world.localPlayerId, input]]) };
     const alpha = loop.advance(dt, ctx);
+
+    // Publish our pose to the relay (throttled to ~10Hz inside the session).
+    session.maybeSendPosition(now);
+
     renderer.draw(world, alpha, dt);
 
     // Drain this frame's sim events for the kill feed, then clear them. The
@@ -94,7 +103,11 @@ async function main() {
     const status = isAlive(me)
       ? `energy ${me.resources.energy.toFixed(0)}`
       : `RESPAWNING in ${((me.combat.respawnAt - world.tick) / TICK_HZ).toFixed(1)}s`;
+    const net = session.connected
+      ? `connected — ${session.playerCount} player${session.playerCount === 1 ? "" : "s"}`
+      : "connecting…";
     hud.textContent =
+      `${net}\n` +
       `fps ${fps}  (sim ${TICK_HZ}Hz)\n` +
       `pos ${k.x.toFixed(0)}, ${k.y.toFixed(0)}\n` +
       `speed ${speed.toFixed(2)} px/tick\n` +

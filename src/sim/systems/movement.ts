@@ -29,6 +29,7 @@ const IDLE: InputCommand = {
  */
 export function movementSystem(world: World, ctx: StepContext): void {
   for (const player of world.players.values()) {
+    if (!world.isAuthority(player.id)) continue; // remotes are network-driven playback (netcode §2.2)
     if (!isAlive(player)) continue; // dead ships don't move or recharge
     stepPlayer(player, ctx.inputs.get(player.id) ?? IDLE, world.map);
   }
