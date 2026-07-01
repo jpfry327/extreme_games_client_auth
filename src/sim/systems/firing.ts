@@ -10,6 +10,7 @@ import type { World } from "../world";
  */
 export function firingSystem(world: World, ctx: StepContext): void {
   for (const player of world.players.values()) {
+    if (!world.isAuthority(player.id)) continue; // remotes fire via their own client (netcode §2.2)
     if (!isAlive(player)) continue; // dead ships can't fire
     const input = ctx.inputs.get(player.id);
     if (!input) continue;

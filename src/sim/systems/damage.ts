@@ -72,6 +72,9 @@ function applyDamage(
   y: number,
 ): void {
   if (damage <= 0) return;
+  // In networked mode only the local (authoritative) ship takes damage on this
+  // client — a remote's health/death is decided by its own client (netcode §2.2).
+  if (!world.isAuthority(target.id)) return;
   target.resources.energy -= damage;
   target.combat.lastHitBy = by;
   const fatal = target.resources.energy <= 0;
