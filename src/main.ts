@@ -73,7 +73,9 @@ async function main() {
     // played back from the wire, never stepped from input on this client.
     const input = keyboard.sample();
     const ctx = { inputs: new Map([[world.localPlayerId, input]]) };
-    const alpha = loop.advance(dt, ctx);
+    // Advance remote-player smoothing on every fixed tick, in lockstep with the
+    // sim, so their tick interpolation lines up (netcode §4).
+    const alpha = loop.advance(dt, ctx, () => session.advanceRemotes());
 
     // Publish our pose to the relay (throttled to ~10Hz inside the session).
     session.maybeSendPosition(now);

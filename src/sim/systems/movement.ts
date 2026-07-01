@@ -1,8 +1,8 @@
-import { shipConfig } from "../../config";
+import { shipConfig, type ShipConfig } from "../../config";
 import { moveAndCollide } from "../collision";
 import type { GameMap } from "../gamemap";
 import { isAlive, snapDirection, tierFor } from "../player";
-import type { InputCommand, Player, StepContext } from "../types";
+import type { InputCommand, Kinematics, Player, StepContext } from "../types";
 import type { World } from "../world";
 
 /** A player with no input this tick coasts: no rotation, no thrust. */
@@ -73,22 +73,8 @@ function stepPlayer(player: Player, input: InputCommand, map: GameMap): void {
     res.energy -= ab.energyPerTick;
   }
 
-  // --- Drag + speed cap ---
-  k.vx *= config.drag;
-  k.vy *= config.drag;
-  const speed = Math.hypot(k.vx, k.vy);
-  if (speed > maxSpeed) {
-    const scale = maxSpeed / speed;
-    k.vx *= scale;
-    k.vy *= scale;
-  }
-
-  // --- Move + wall bounce ---
-  const r = moveAndCollide(map, k.x, k.y, k.vx, k.vy, config.radius, config.bounceFactor);
-  k.x = r.x;
-  k.y = r.y;
-  k.vx = r.vx;
-  k.vy = r.vy;
+  // --- Drag, speed cap, move + wall bounce (shared with remote dead reckoning) ---
+  advanceKinematics(k, config, maxSpeed, map);
 
   // --- Energy recharge (see NOTE above re: pipeline placement) ---
   if (res.energy < res.maxEnergy) {
@@ -98,4 +84,41 @@ function stepPlayer(player: Player, input: InputCommand, map: GameMap): void {
   // --- Weapon cooldowns ---
   if (player.combat.bulletCooldown > 0) player.combat.bulletCooldown--;
   if (player.combat.bombCooldown > 0) player.combat.bombCooldown--;
+}
+
+/**
+ * Advance one player one tick by **dead reckoning** — the pose the sim would
+ * reach if it coasted at its current velocity with no input. This is the
+ * physics half of remote-player playback (netcode §4): it reuses the exact same
+ * drag / speed-cap / wall-bounce path the local ship runs, so an opponent's
+ * predicted motion and their real motion can never diverge from a config drift
+ * (netcode §9). It does NOT write `prev*`, apply thrust/rotation, or touch
+ * energy/cooldowns — the caller in `net/remotePlayers` owns those.
+ */
+export function coastPlayer(player: Player, map: GameMap): void {
+  advanceKinematics(player.kinematics, shipConfig(player.shipType), tierFor(player).maxSpeed, map);
+}
+
+/** Drag → speed cap → one tick of wall-collided movement. The pose-advancing
+ *  tail shared by local stepping (with thrust already applied) and remote dead
+ *  reckoning (velocity straight off the wire). */
+function advanceKinematics(
+  k: Kinematics,
+  config: ShipConfig,
+  maxSpeed: number,
+  map: GameMap,
+): void {
+  k.vx *= config.drag;
+  k.vy *= config.drag;
+  const speed = Math.hypot(k.vx, k.vy);
+  if (speed > maxSpeed) {
+    const scale = maxSpeed / speed;
+    k.vx *= scale;
+    k.vy *= scale;
+  }
+  const r = moveAndCollide(map, k.x, k.y, k.vx, k.vy, config.radius, config.bounceFactor);
+  k.x = r.x;
+  k.y = r.y;
+  k.vx = r.vx;
+  k.vy = r.vy;
 }

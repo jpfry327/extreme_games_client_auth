@@ -33,6 +33,26 @@ const DEG_TO_RAD_TICK = Math.PI / 20000; // raw rotation -> radians/tick
 export const TICK_HZ = 100; // Subspace runs the sim at 100Hz
 export const TICK_DT = 1 / TICK_HZ; // seconds per tick (0.01s)
 
+// --- Netcode: remote-player smoothing (M2.1, netcode §4) ---------------------
+// How a remote opponent's motion is played back from position packets.
+export const NET = {
+  /** Length of the linear error-correction smear, in ticks. netcode §4 sets a
+   *  200 ms correction; at 100 Hz that's 20 ticks. A received packet's position
+   *  error is closed evenly over this many ticks. */
+  lerpTicks: 20,
+
+  /** Snap threshold, in tiles (per axis). If dead reckoning is off from a fresh
+   *  packet by at least this much, we hard-warp instead of smoothing — netcode
+   *  §4 uses 4 tiles. */
+  snapTiles: 4,
+
+  /** Ticks a received packet is assumed to have aged in flight, used to
+   *  extrapolate a remote to its estimated present (netcode §4 `simTicks`).
+   *  M2.1 placeholder: a fixed estimate (~half a send interval + a little
+   *  latency). M2.4 replaces this with the clock-derived packet age. */
+  ageTicks: 8,
+} as const;
+
 // --- Map ---------------------------------------------------------------------
 export const TILE_SIZE = 16; // each tile is 16x16 px (Subspace standard)
 export const MAP_TILES = 1024; // svs map is 1024x1024 tiles

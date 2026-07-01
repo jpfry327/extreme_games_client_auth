@@ -136,9 +136,11 @@ implementations — nullspace (client) and eg-asss (server).
       `sendReliable`/`sendUnreliable` transport interface; two browsers connect
       and exchange raw position packets, seeing each other as *unsmoothed* dots.
       Proves the plumbing. (netcode §3, §6, §7)
-- [ ] **M2.1 — Remote playback + smoothing.** Dead-reckoning + 200 ms lerp + snap
+- [x] **M2.1 — Remote playback + smoothing.** Dead-reckoning + 200 ms lerp + snap
       (netcode §4). Opponent ships now move *smoothly*. This is the "feel"
-      milestone — validate against the local-bot feel from M1.
+      milestone — validate against the local-bot feel from M1. *(Packet-age
+      `simTicks` is a fixed estimate here (`NET.ageTicks`); M2.4 swaps in the
+      clock-derived age. Player timeout/hide also deferred to M2.4.)*
 - [ ] **M2.2 — Weapons over the wire.** Fold the weapon descriptor into position
       packets; remote fires spawn locally-simulated projectiles (reuse
       `firingSystem`). Bullets/bombs appear instantly at the firing ship.
