@@ -13,7 +13,7 @@
  */
 
 import type { ShipType } from "../config";
-import type { PlayerId, TeamId } from "../sim/types";
+import type { PlayerId, ProjectileKind, TeamId } from "../sim/types";
 
 /** The roster fact about one player: who they are + where they are. Sent in the
  *  welcome snapshot and in each enter announcement so a joiner can place ships
@@ -57,14 +57,27 @@ export interface LeaveMessage {
 }
 
 /**
+ * The weapon descriptor folded into a position packet on the tick a shot fires
+ * (netcode §3) — this is what makes fires feel instant: there is no separate
+ * "fire" message, and every client spawns the projectile locally from the
+ * shooter's asserted pose. Kept as a nested object (not a bare `kind` string) so
+ * later milestones extend it *additively*: `level` (M4 ship levels),
+ * `bouncing`/`shrapLevel`/`shrap`/`alternate` (M5 items) mirror the original
+ * `struct Weapons`.
+ */
+export interface WeaponDescriptor {
+  kind: ProjectileKind; // "bullet" | "bomb"
+}
+
+/**
  * The position packet (netcode §3) — the workhorse, sent unreliable at ~10 Hz.
  * C2S it carries **no `id`** (the relay stamps the sender's id before fan-out);
  * S2C it always has one. `tick` is the sender's local sim tick, carried now and
  * used for packet-age smoothing once M2.1/M2.4 add the clock.
  *
- * NOTE (M2.2/M2.3): the full Subspace position packet also folds in a 2-byte
- * weapon descriptor and status bits. Those land with weapons-over-the-wire and
- * victim death; the field slot is called out here so the shape is visible.
+ * `weapon` is present only on the extra packet sent the instant a shot fires
+ * (M2.2); normal throttled packets omit it so a remote never double-spawns. The
+ * `status` bits (stealth/cloak/flash) fold in with victim death (M2.3).
  */
 export interface PositionMessage {
   t: "pos";
@@ -77,8 +90,8 @@ export interface PositionMessage {
   rotation: number;
   energy: number;
   bounty: number;
-  // weapon?: WeaponDescriptor;  // ← M2.2
-  // status?: number;            // ← M2.3 (stealth/cloak/flash bits)
+  weapon?: WeaponDescriptor; // present only on the packet that announces a shot
+  // status?: number;        // ← M2.3 (stealth/cloak/flash bits)
 }
 
 /** Everything that can cross the wire. Discriminated by `t`. */

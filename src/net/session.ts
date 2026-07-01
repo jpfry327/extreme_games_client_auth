@@ -10,7 +10,7 @@
  * their own network ids.
  */
 
-import { decode, encode, type PositionMessage } from "./protocol";
+import { decode, encode, type PositionMessage, type WeaponDescriptor } from "./protocol";
 import { RemotePlayers } from "./remotePlayers";
 import type { Transport } from "./transport";
 import type { World } from "../sim/world";
@@ -54,13 +54,36 @@ export class Session {
     return this.world.players.size;
   }
 
-  /** Send the local ship's pose if the throttle window has elapsed. Called once
-   *  per rendered frame from the main loop; `nowMs` is a real-time clock. */
+  /**
+   * Push the local ship's pose to the relay. Called once per rendered frame from
+   * the main loop (`nowMs` is a real-time clock). Two triggers (netcode §3):
+   *
+   *   - **On every shot**, immediately — one packet per `weaponFired` event this
+   *     frame, each carrying that shot's weapon descriptor so remotes spawn the
+   *     projectile at once. This is what makes fires feel instant, and it
+   *     bypasses the throttle.
+   *   - **Otherwise**, the steady ~10 Hz cadence, with no weapon (a bare weapon
+   *     field would make a remote double-spawn).
+   */
   maybeSendPosition(nowMs: number): void {
     if (!this.open || this.myId === null) return;
-    if (nowMs - this.lastSentMs < POSITION_INTERVAL_MS) return;
-    this.lastSentMs = nowMs;
 
+    let fired = false;
+    for (const e of this.world.events) {
+      if (e.type !== "weaponFired" || e.owner !== this.world.localPlayerId) continue;
+      this.send(nowMs, { kind: e.kind });
+      fired = true;
+    }
+    if (fired) return; // a shot already carried this frame's pose out
+
+    if (nowMs - this.lastSentMs < POSITION_INTERVAL_MS) return;
+    this.send(nowMs);
+  }
+
+  /** Encode and send one position packet for the local ship's current pose,
+   *  optionally folding in a weapon descriptor. Resets the throttle clock. */
+  private send(nowMs: number, weapon?: WeaponDescriptor): void {
+    this.lastSentMs = nowMs;
     const me = this.world.localPlayer;
     const k = me.kinematics;
     const pkt: PositionMessage = {
@@ -73,6 +96,7 @@ export class Session {
       rotation: k.rotation,
       energy: me.resources.energy,
       bounty: me.combat.bounty,
+      ...(weapon ? { weapon } : {}),
     };
     this.transport.sendUnreliable(encode(pkt));
   }

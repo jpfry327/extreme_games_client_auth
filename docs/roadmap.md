@@ -141,9 +141,13 @@ implementations — nullspace (client) and eg-asss (server).
       milestone — validate against the local-bot feel from M1. *(Packet-age
       `simTicks` is a fixed estimate here (`NET.ageTicks`); M2.4 swaps in the
       clock-derived age. Player timeout/hide also deferred to M2.4.)*
-- [ ] **M2.2 — Weapons over the wire.** Fold the weapon descriptor into position
+- [x] **M2.2 — Weapons over the wire.** Fold the weapon descriptor into position
       packets; remote fires spawn locally-simulated projectiles (reuse
-      `firingSystem`). Bullets/bombs appear instantly at the firing ship.
+      `firingSystem`). Bullets/bombs appear instantly at the firing ship. *(Remote
+      fire now damages — and can locally kill/respawn — your own ship, since the
+      local sim still runs `collision→damage→death` on itself. That death is not
+      yet announced over the wire, so clients don't agree on kills/score until
+      M2.3.)*
 - [ ] **M2.3 — Victim-authoritative death.** Self-hit detection → death packet →
       server validates and rebroadcasts a Kill → score/bounty/kill-feed. Two
       humans can now actually fight. Requires the `damage`/`death` split

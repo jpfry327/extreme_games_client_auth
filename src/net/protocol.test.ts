@@ -23,6 +23,19 @@ const messages: NetMessage[] = [
     energy: 1650,
     bounty: 7,
   },
+  {
+    t: "pos",
+    id: "p2",
+    tick: 43,
+    x: 512.5,
+    y: 1024.25,
+    vx: -1.5,
+    vy: 2.5,
+    rotation: 0.7853981633974483,
+    energy: 1628,
+    bounty: 7,
+    weapon: { kind: "bomb" }, // the shot-announcing packet (M2.2)
+  },
 ];
 
 describe("protocol encode/decode", () => {
@@ -47,5 +60,20 @@ describe("protocol encode/decode", () => {
     const decoded = decode(encode(c2s));
     expect(decoded).toEqual(c2s);
     expect("id" in decoded).toBe(false);
+  });
+
+  it("omits weapon on a normal (non-firing) position packet", () => {
+    const c2s: NetMessage = {
+      t: "pos",
+      tick: 1,
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      rotation: 0,
+      energy: 100,
+      bounty: 0,
+    };
+    expect("weapon" in decode(encode(c2s))).toBe(false);
   });
 });

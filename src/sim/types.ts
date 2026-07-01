@@ -207,8 +207,20 @@ export interface PlayerSpawnedEvent {
   y: number;
 }
 
+/** A ship fired a weapon this tick. The network layer reads this for the local
+ *  player to fold a weapon descriptor into an immediate position packet (M2.2,
+ *  netcode §3); the sound manager will ride the same event (M6). Carries only
+ *  what identifies the shot — the projectile itself is already in
+ *  `world.projectiles`. */
+export interface WeaponFiredEvent {
+  type: "weaponFired";
+  owner: PlayerId;
+  kind: ProjectileKind;
+}
+
 export type GameEvent =
   | BombExplodedEvent
   | ShipHitEvent
   | ShipDiedEvent
-  | PlayerSpawnedEvent;
+  | PlayerSpawnedEvent
+  | WeaponFiredEvent;
