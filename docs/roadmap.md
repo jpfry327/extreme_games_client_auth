@@ -31,7 +31,7 @@ read [architecture.md](architecture.md) first — it's the contract.
 ```
 M0  Foundational refactor ........ multiplayer-shaped sim (no new gameplay)
 M1  Combat core .................. damage/death/respawn/bounty (vs local bot)   ← keystone
-M2  Multiplayer transport ........ server + snapshots + prediction              ← de-risks the core bet
+M2  Server architecture .......... TBD — new model under design
 M3  Client surfaces / UI ......... bitmap-font toolkit, chat, statbox, minimap
 M4  All 8 ships .................. from config + sheets + ship select
 M5  Special items & status ....... repel, burst, mines, toggles, super/shields
@@ -42,9 +42,10 @@ P2  Competitive ................. flags/baseduel, powerball, bricks/doors, match
 
 **Why this order:** combat (M1) is the keystone everything competitive needs, and
 it can be validated cheaply against a local bot *before* netcode. Networking (M2)
-is the project's biggest unknown — "does server-authoritative + prediction feel
-good?" — so it comes early, while scope is still just Warbird + bullets/bombs.
-Everything after rides on systems already proven.
+is the project's biggest unknown — so it comes early, while scope is still just
+Warbird + bullets/bombs — but the specific server model is **TBD** and being
+redesigned; see the M2 section below. Everything after rides on systems already
+proven.
 
 ---
 
@@ -110,29 +111,56 @@ respawn; bounty and points tick; a kill line appears.
 
 ---
 
-## M2 — Multiplayer transport
+## M2 — Server architecture (client-authoritative, Subspace-faithful)
 
-**Goal:** the authoritative server runs the sim headless; two browsers connect
-and fight on it. This is the architecture's payoff and the project's biggest bet.
+**Goal:** two humans connect through a Node relay and fight, and it **feels like
+the local build** — opponents move smoothly and their bullets/bombs come out with
+zero visible lag.
 
-**Unlocks:** real multiplayer; replaces the bot with real players (bot stays as
-AI filler). Proves the snapshot + prediction model against real gameplay.
+**Model (decided):** the *original* Subspace client-authoritative model, not the
+server-authoritative one. Each client owns its own ship and its own death (the
+"defender authority"); the server is a thin **relay + validator + fan-out** that
+runs no physics. Projectiles are broadcast as a one-shot fire event and simulated
+locally on every client — which is exactly why there's no weapon lag. The full
+design, wire protocol, smoothing algorithm, and rationale live in
+**[netcode.md](netcode.md)** — read it before starting; it's the contract for
+this milestone the way architecture.md is for the sim.
 
-**Scope:**
-- [ ] `net/`: a server process running `sim/` at 100Hz, headless.
-- [ ] WebSocket transport: client → `InputCommand`; server → `Snapshot` + `events`.
-- [ ] `serializeSnapshotFor(world, playerId)` — start global, but build the
-      **per-client seam** now (filtering comes with stealth in M5).
-- [ ] Client-side **prediction + reconciliation** for the local player.
-- [ ] **Entity interpolation** for remote players (extend the existing tick-interp).
-- [ ] Join/leave, basic player identity (name), debug-quality nametags.
+**Why this model:** it's known-playable (ran Subspace for 20+ years) and it's the
+only model that reproduces the prototype's feel. Validated against two reference
+implementations — nullspace (client) and eg-asss (server).
 
-**Out of scope:** polished UI, chat, ships beyond Warbird, items, accounts.
+**Sub-milestones (each ends playable):**
 
-**Playable end state:** open two tabs → both join a server → see and fight each
-other with prediction-smooth movement. The core bet is now de-risked.
+- [ ] **M2.0 — Transport + echo.** WebSocket relay in Node behind a
+      `sendReliable`/`sendUnreliable` transport interface; two browsers connect
+      and exchange raw position packets, seeing each other as *unsmoothed* dots.
+      Proves the plumbing. (netcode §3, §6, §7)
+- [ ] **M2.1 — Remote playback + smoothing.** Dead-reckoning + 200 ms lerp + snap
+      (netcode §4). Opponent ships now move *smoothly*. This is the "feel"
+      milestone — validate against the local-bot feel from M1.
+- [ ] **M2.2 — Weapons over the wire.** Fold the weapon descriptor into position
+      packets; remote fires spawn locally-simulated projectiles (reuse
+      `firingSystem`). Bullets/bombs appear instantly at the firing ship.
+- [ ] **M2.3 — Victim-authoritative death.** Self-hit detection → death packet →
+      server validates and rebroadcasts a Kill → score/bounty/kill-feed. Two
+      humans can now actually fight. Requires the `damage`/`death` split
+      (netcode §2.2).
+- [ ] **M2.4 — Clock sync + hardening.** Averaged `serverTimeOffset`, stale-packet
+      drop, player timeout/hide, `c2slatency` stamping (netcode §5). Convert the
+      M1 bot into a headless "bot client" that connects through the relay (the
+      lobby-AI-filler payoff noted in M1).
 
-**Refs:** catalog §10; architecture §5.
+**Out of scope:** area-of-interest culling beyond "send everyone everything"
+(seam built, trivial version shipped — arch §5.1), WebTransport/WebRTC (WebSocket
+first, abstracted), stealth/cloak visibility (rides on M5), anti-cheat.
+
+**Playable end state:** two people open the build, connect to the relay, and duel
+with the same smoothness and instant weapons as the single-player prototype.
+
+**Refs:** **[netcode.md](netcode.md)** (the contract); architecture §5 describes
+the *old* server-authoritative assumption and is superseded by netcode.md — due a
+revision pass to point there.
 
 ---
 
