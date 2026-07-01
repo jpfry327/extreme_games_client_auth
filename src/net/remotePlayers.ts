@@ -21,6 +21,7 @@
 
 import { NET, TILE_SIZE } from "../config";
 import { coastPlayer } from "../sim/systems/movement";
+import { spawnProjectile } from "../sim/systems/firing";
 import { isAlive } from "../sim/player";
 import type { PositionMessage, RemoteInfo } from "./protocol";
 import type { PlayerId } from "../sim/types";
@@ -107,6 +108,17 @@ export class RemotePlayers {
 
     p.resources.energy = pkt.energy;
     p.combat.bounty = pkt.bounty;
+
+    // A weapon rides only on the packet the shooter sent the instant it fired
+    // (netcode §3). Spawn its projectile locally from the *asserted* pose — not
+    // the extrapolated/rendered one — so it leaves the ship exactly as the
+    // shooter fired it. It then flies through the normal `projectileSystem` and
+    // can hit our own hull; the shooter's client owns the identical shot.
+    if (pkt.weapon) {
+      world.projectiles.push(
+        spawnProjectile(id, p.shipType, pkt.weapon.kind, pkt.x, pkt.y, pkt.vx, pkt.vy, pkt.rotation),
+      );
+    }
   }
 
   /** Advance every remote one sim tick: dead-reckon, then apply the decaying

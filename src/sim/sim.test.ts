@@ -3,6 +3,7 @@ import { COMBAT, shipConfig, WARBIRD } from "../config";
 import { GameMap } from "./gamemap";
 import { isAlive } from "./player";
 import { SeededRng } from "./rng";
+import { spawnProjectile } from "./systems/firing";
 import type { InputCommand, Player, Projectile, StepContext } from "./types";
 import { World } from "./world";
 
@@ -109,6 +110,53 @@ describe("firingSystem", () => {
     world.localPlayer.resources.energy = 0;
     world.step(ctx(world, input({ fire: true })));
     expect(world.projectiles).toHaveLength(0);
+  });
+
+  it("emits one weaponFired event per shot (and none when gated)", () => {
+    const world = new World(openMap());
+
+    world.step(ctx(world, input({ fire: true })));
+    const fires = world.events.filter((e) => e.type === "weaponFired");
+    expect(fires).toHaveLength(1);
+    expect(fires[0]).toMatchObject({ owner: world.localPlayerId, kind: "bullet" });
+
+    // Next tick the gun is on cooldown — no projectile, no event.
+    world.events.length = 0;
+    world.step(ctx(world, input({ fire: true })));
+    expect(world.events.some((e) => e.type === "weaponFired")).toBe(false);
+  });
+});
+
+// --- spawnProjectile (shared spawn logic — local firing + remote playback) ---
+
+describe("spawnProjectile", () => {
+  it("places the shot at the muzzle with velocity = shooterVel + heading·speed", () => {
+    const warbird = shipConfig(WARBIRD);
+    const speed = warbird.bullet.speed;
+    const muzzle = warbird.radius + 2;
+
+    // rotation 0 points up: facing = (sin 0, -cos 0) = (0, -1).
+    const p = spawnProjectile("p2", WARBIRD, "bullet", 100, 200, 1, 0, 0);
+
+    expect(p.owner).toBe("p2");
+    expect(p.kind).toBe("bullet");
+    expect(p.x).toBeCloseTo(100); // no sideways muzzle offset facing up
+    expect(p.y).toBeCloseTo(200 - muzzle);
+    expect(p.vx).toBeCloseTo(1); // shooter's own velocity carried through
+    expect(p.vy).toBeCloseTo(-speed); // plus the weapon speed along the heading
+    expect(p.prevX).toBe(p.x); // starts static for interpolation
+    expect(p.prevY).toBe(p.y);
+  });
+
+  it("carries the shooter's velocity into the shot for both kinds", () => {
+    const bullet = spawnProjectile("p2", WARBIRD, "bullet", 0, 0, 2, 3, 0);
+    const bomb = spawnProjectile("p2", WARBIRD, "bomb", 0, 0, 2, 3, 0);
+    // vx keeps the shooter's sideways drift; vy adds each weapon's own speed.
+    expect(bullet.vx).toBeCloseTo(2);
+    expect(bomb.vx).toBeCloseTo(2);
+    expect(bullet.vy).toBeCloseTo(3 - shipConfig(WARBIRD).bullet.speed);
+    expect(bomb.vy).toBeCloseTo(3 - shipConfig(WARBIRD).bomb.speed);
+    expect(bomb.bounces).toBe(shipConfig(WARBIRD).bomb.bounces);
   });
 });
 

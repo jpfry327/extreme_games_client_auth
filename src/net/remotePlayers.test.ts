@@ -118,3 +118,35 @@ describe("RemotePlayers — smoothing (netcode §4)", () => {
     expect(() => rp.advanceTick(world)).not.toThrow();
   });
 });
+
+describe("RemotePlayers — weapons over the wire (netcode §3)", () => {
+  it("spawns a remote's projectile from the packet's asserted pose", () => {
+    const world = netWorld();
+    const rp = new RemotePlayers();
+    rp.ensureRemote(world, info("p2", 300, 300));
+
+    // A packet that both moves p2 and announces a bullet fired from (300, 250)
+    // heading up (rotation 0). We spawn the shot from that asserted pose.
+    rp.applyPosition(
+      world,
+      pos("p2", { x: 300, y: 250, vx: 0, vy: -1, rotation: 0, weapon: { kind: "bullet" } }),
+    );
+
+    expect(world.projectiles).toHaveLength(1);
+    const shot = world.projectiles[0];
+    expect(shot.owner).toBe("p2"); // owned by the remote, not the local ship
+    expect(shot.kind).toBe("bullet");
+    expect(shot.x).toBeCloseTo(300); // muzzle offset is straight up (no x drift)
+    expect(shot.y).toBeLessThan(250); // ahead of the asserted ship position
+    expect(shot.vy).toBeLessThan(-1); // shooter velocity + weapon speed, upward
+  });
+
+  it("spawns nothing on a normal (weaponless) position packet", () => {
+    const world = netWorld();
+    const rp = new RemotePlayers();
+    rp.ensureRemote(world, info("p2", 300, 300));
+
+    rp.applyPosition(world, pos("p2", { x: 305, y: 300 }));
+    expect(world.projectiles).toHaveLength(0);
+  });
+});
