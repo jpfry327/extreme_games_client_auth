@@ -13,6 +13,11 @@ import type { World } from "./world";
  *
  * The same `StepContext` is applied to every tick we run this frame — the client
  * sampled input once for the frame, and all the catch-up ticks share that intent.
+ *
+ * `onTick` runs once per fixed tick, right after `world.step()`. Networked mode
+ * uses it to advance remote-player smoothing in lockstep with the sim so the
+ * renderer's tick interpolation stays aligned (netcode §4 step 6); it stays out
+ * of the pure `step()` because it's net-layer playback, not simulation.
  */
 export class FixedLoop {
   private accumulator = 0;
@@ -20,11 +25,12 @@ export class FixedLoop {
 
   constructor(private readonly world: World) {}
 
-  advance(dtSeconds: number, ctx: StepContext): number {
+  advance(dtSeconds: number, ctx: StepContext, onTick?: () => void): number {
     this.accumulator += Math.min(dtSeconds, FixedLoop.MAX_FRAME);
 
     while (this.accumulator >= TICK_DT) {
       this.world.step(ctx);
+      onTick?.();
       this.accumulator -= TICK_DT;
     }
 

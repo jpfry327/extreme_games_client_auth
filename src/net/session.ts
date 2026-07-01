@@ -11,7 +11,7 @@
  */
 
 import { decode, encode, type PositionMessage } from "./protocol";
-import { applyPosition, ensureRemote, removeRemote } from "./remotePlayers";
+import { RemotePlayers } from "./remotePlayers";
 import type { Transport } from "./transport";
 import type { World } from "../sim/world";
 import type { PlayerId } from "../sim/types";
@@ -25,6 +25,9 @@ export class Session {
   private open = false;
   private lastSentMs = 0;
 
+  /** Playback + smoothing for every non-local ship (netcode §4). */
+  private readonly remotes = new RemotePlayers();
+
   constructor(
     private readonly transport: Transport,
     private readonly world: World,
@@ -32,6 +35,13 @@ export class Session {
     transport.onOpen(() => this.onOpen());
     transport.onClose(() => (this.open = false));
     transport.onMessage((data) => this.onMessage(data));
+  }
+
+  /** Advance remote-player smoothing by one sim tick. Call once per fixed tick,
+   *  in lockstep with `world.step()`, so the renderer's tick interpolation lines
+   *  up (netcode §4 step 6). */
+  advanceRemotes(): void {
+    this.remotes.advanceTick(this.world);
   }
 
   /** True once the socket is open (whether or not `welcome` has landed yet). */
@@ -87,17 +97,17 @@ export class Session {
       case "welcome":
         this.myId = msg.id;
         for (const info of msg.players) {
-          if (info.id !== this.myId) ensureRemote(this.world, info);
+          if (info.id !== this.myId) this.remotes.ensureRemote(this.world, info);
         }
         break;
       case "enter":
-        if (msg.player.id !== this.myId) ensureRemote(this.world, msg.player);
+        if (msg.player.id !== this.myId) this.remotes.ensureRemote(this.world, msg.player);
         break;
       case "leave":
-        removeRemote(this.world, msg.id);
+        this.remotes.removeRemote(this.world, msg.id);
         break;
       case "pos":
-        if (msg.id !== this.myId) applyPosition(this.world, msg);
+        if (msg.id !== this.myId) this.remotes.applyPosition(this.world, msg);
         break;
       // hello is C2S only; ignore if ever echoed back.
     }
